@@ -1,4 +1,6 @@
 import argparse
+import datetime
+import json
 import os
 import sys
 import time
@@ -8,13 +10,22 @@ import torch
 import torch.nn as nn
 from torchsummary import summary
 import numpy as np
-import wandb
-import onnx
 
-from ViNet_S_dataloader import * 
+from ViNet_S_dataloader import *
 from loss import *
 from ViNet_S_model import *
+from outplay_dataset import OutplayWindowDataset
 from utils import *
+
+OUTPLAY_MLFLOW_URI = "http://104.105.26.182:5000"
+OUTPLAY_MLFLOW_EXPERIMENT = "sports-saliency-ViNet-S"
+OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split"
+OUTPLAY_RUNS_ROOT = "/home/nitesh_sawadia/vinet_s/runs"
+OUTPLAY_TB_ROOT = "/home/nitesh_sawadia/vinet_s/tensorboard"
+OUTPLAY_VAL_IMAGE_INDEXES = (0, 65, 130, 195, 260, 325, 390, 455)
+_OVERLAY_ALPHA = 0.5
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--no_epochs',default=40, type=int)
@@ -80,9 +91,21 @@ parser.add_argument('--model_save_path', default='', type=str)
 
 parser.add_argument('--fold_lists_path',default='',type=str)
 
+parser.add_argument('--split_root', default=OUTPLAY_SPLIT_ROOT, type=str)
+parser.add_argument('--save_every', default=1, type=int)
+
 
 
 args = parser.parse_args()
+
+if args.dataset == "outplay":
+    args.grouped_conv = True
+    args.root_grouping = True
+    args.depth_grouping = False
+    args.efficientnet = False
+    args.num_hier = 3
+    args.clip_size = 32
+
 print(args)
 
 if args.grouped_conv and args.efficientnet:
@@ -102,6 +125,7 @@ else:
 
 
 if args.use_wandb:
+    import wandb
     config = {
         "lr": args.lr, 
         "model_type": "VideoSaliency",
@@ -182,13 +206,68 @@ elif args.dataset == "Coutrot_db2":
 elif args.dataset == "mvva":
     train_dataset = MVVADataset(args.clip_size, mode="train", dataset_name=args.dataset, split=args.split ,args = args)
     val_dataset = MVVADataset(args.clip_size, mode="val", dataset_name=args.dataset, split=args.split,args = args)
+elif args.dataset == "outplay":
+    train_dataset = OutplayWindowDataset(args.split_root, "train", clip_size=args.clip_size)
+    val_dataset = OutplayWindowDataset(args.split_root, "val", clip_size=args.clip_size)
 
 
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.no_workers, pin_memory=args.pin_memory)
 val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.no_workers, pin_memory=args.pin_memory)
 
 
-if os.path.isfile(file_weight):
+def _coerce_state_dict(loaded):
+    if not isinstance(loaded, dict):
+        print("Checkpoint is %s, expected a state dict" % type(loaded).__name__)
+        sys.exit(1)
+    if loaded and all(torch.is_tensor(value) for value in loaded.values()):
+        return loaded
+    for key in ("state_dict", "model"):
+        nested = loaded.get(key)
+        if isinstance(nested, dict) and nested and all(torch.is_tensor(value) for value in nested.values()):
+            print("Using checkpoint entry '%s'" % key)
+            return nested
+    return loaded
+
+
+def _strip_module_prefix(state):
+    if not any(isinstance(key, str) and key.startswith("module.") for key in state):
+        return state
+    stripped = {}
+    for key, value in state.items():
+        if isinstance(key, str) and key.startswith("module."):
+            stripped[key[len("module."):]] = value
+        else:
+            stripped[key] = value
+    return stripped
+
+
+def _load_saliency_checkpoint(model, path):
+    if not os.path.isfile(path):
+        print("Saliency checkpoint not found: %s" % path)
+        sys.exit(1)
+    print("Loading pretrained saliency model weights:", path)
+    state = _strip_module_prefix(_coerce_state_dict(torch.load(path, map_location="cpu")))
+    try:
+        model.load_state_dict(state, strict=True)
+    except RuntimeError as exc:
+        model_sd = model.state_dict()
+        missing = [key for key in model_sd.keys() if key not in state]
+        unexpected = [key for key in state.keys() if key not in model_sd]
+        print("Strict load_state_dict failed.")
+        print(exc)
+        print("missing keys (%d):" % len(missing))
+        for key in missing:
+            print(key)
+        print("unexpected keys (%d):" % len(unexpected))
+        for key in unexpected:
+            print(key)
+        sys.exit(1)
+    print("Loaded saliency checkpoint with strict=True")
+
+
+if args.checkpoint_path != "None":
+    _load_saliency_checkpoint(model, args.checkpoint_path)
+elif os.path.isfile(file_weight):
     print ('loading kinetics weight file')
     weight_dict = torch.load(file_weight)
     model_dict = model.backbone.state_dict()
@@ -220,12 +299,8 @@ if os.path.isfile(file_weight):
 else:
     print ('weight file?')
 
-assert os.path.exists(args.checkpoint_path)
-
-if args.checkpoint_path!="None":
-    print("Loading pretrained saliency model weights: ",args.checkpoint_path)
-
-    model.load_state_dict(torch.load(args.checkpoint_path))
+if args.checkpoint_path == "None":
+    assert os.path.exists(args.checkpoint_path)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -236,12 +311,60 @@ optimizer = torch.optim.Adam(params, lr=args.lr)
 
 print(device)
 
+def _denormalize_frame(frame_chw):
+    frame = frame_chw.detach().float().cpu().numpy()
+    image = frame * _IMAGENET_STD + _IMAGENET_MEAN
+    return np.clip(image, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def _jet_overlay(frame_chw, sal_hw):
+    frame = _denormalize_frame(frame_chw)
+    sal = sal_hw.detach().float().cpu().numpy()
+    height, width = frame.shape[1], frame.shape[2]
+    if sal.shape != (height, width):
+        sal = cv2.resize(sal, (width, height), interpolation=cv2.INTER_LINEAR)
+    sal = np.clip(sal, 0.0, 1.0)
+    heat_bgr = cv2.applyColorMap(np.round(sal * 255.0).astype(np.uint8), cv2.COLORMAP_JET)
+    heat = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    frame_hwc = np.transpose(frame, (1, 2, 0))
+    blended = (1.0 - _OVERLAY_ALPHA) * frame_hwc + _OVERLAY_ALPHA * heat
+    return np.ascontiguousarray(np.transpose(np.clip(blended, 0.0, 1.0), (2, 0, 1)))
+
+
+def _log_clip_images(writer, clip_id, frames, maps, step, overlay_kind):
+    single_map = maps.dim() == 2
+    for t in range(int(frames.shape[0])):
+        frame = frames[t]
+        writer.add_image("samples/%s/frame/%d" % (clip_id, t), _denormalize_frame(frame), step)
+        saliency = maps if single_map else maps[t]
+        writer.add_image(
+            "samples/%s/%s/%d" % (clip_id, overlay_kind, t),
+            _jet_overlay(frame, saliency),
+            step,
+        )
+
+
+def _log_train_gt_preview(writer, loader):
+    batch = next(iter(loader))
+    clips = batch[0]
+    all_maps = batch[2]
+    for index in range(int(clips.shape[0])):
+        _log_clip_images(writer, str(index), clips[index], all_maps[index], 0, "gt_overlay")
+    writer.flush()
+
+
+def _save_checkpoint(model, path):
+    torch.save(model.state_dict(), path)
+
+
 def train(model, optimizer, loader, epoch, device, args):
     model.train()
     tic = time.time()
     
     total_loss = AverageMeter()
     cur_loss = AverageMeter()
+    total_cc = AverageMeter()
+    total_sim = AverageMeter()
 
     for idx, sample in enumerate(loader):
         img_clips = sample[0]
@@ -262,6 +385,10 @@ def train(model, optimizer, loader, epoch, device, args):
         optimizer.step()
         total_loss.update(loss.item())
         cur_loss.update(loss.item())
+        if args.dataset == "outplay":
+            with torch.no_grad():
+                total_cc.update(cc(pred_sal.detach(), gt_sal.detach()).item())
+                total_sim.update(similarity(pred_sal.detach(), gt_sal.detach()).item())
 
         if idx%args.log_interval==(args.log_interval-1):
             print('[{:2d}, {:5d}] avg_loss : {:.5f}, time:{:3f} minutes'.format(epoch, idx, cur_loss.avg, (time.time()-tic)/60))
@@ -280,16 +407,20 @@ def train(model, optimizer, loader, epoch, device, args):
         'lr': optimizer.param_groups[0]['lr'],
         'train_time': time_taken
     }
+    if args.dataset == "outplay":
+        data_to_log['cc'] = total_cc.avg
+        data_to_log['sim'] = total_sim.avg
 
     return data_to_log
 
-def validate(model, loader, epoch, device, args):
+def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=()):
     model.eval()
     tic = time.time()
     total_loss = AverageMeter()
     total_cc_loss = AverageMeter()
     total_sim_loss = AverageMeter()
     tic = time.time()
+    image_index_set = set(image_indexes)
     for idx, sample in enumerate(loader):
         img_clips = sample[0]
         gt_sal = sample[1]
@@ -299,6 +430,15 @@ def validate(model, loader, epoch, device, args):
         
 
         pred_sal = model(img_clips)
+        if tb_writer is not None and idx in image_index_set:
+            _log_clip_images(
+                tb_writer,
+                str(idx),
+                sample[0][0],
+                pred_sal[0],
+                epoch,
+                "pred_overlay",
+            )
         
         gt_sal = gt_sal.squeeze(0).numpy()
 
@@ -334,40 +474,147 @@ def validate(model, loader, epoch, device, args):
 
     return data_to_log
 
+def _run_outplay(model, optimizer, train_loader, val_loader, device, args):
+    if args.save_every < 1:
+        print("save_every must be >= 1")
+        sys.exit(1)
+    missing_indexes = [index for index in OUTPLAY_VAL_IMAGE_INDEXES if index >= len(val_loader.dataset)]
+    if missing_indexes:
+        print("Validation image indexes are outside the manifest:", missing_indexes)
+        sys.exit(1)
+
+    import mlflow
+    from torch.utils.tensorboard import SummaryWriter
+
+    mlflow.set_tracking_uri(OUTPLAY_MLFLOW_URI)
+    mlflow.set_experiment(OUTPLAY_MLFLOW_EXPERIMENT)
+    utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    with mlflow.start_run() as run:
+        run_id = run.info.run_id
+        run_name = "%s_%s" % (utc, run_id)
+        run_dir = os.path.join(OUTPLAY_RUNS_ROOT, run_name)
+        tb_dir = os.path.join(OUTPLAY_TB_ROOT, run_name)
+        ckpt_dir = os.path.join(run_dir, "checkpoints")
+        config_dir = os.path.join(run_dir, "config")
+        tb_train = os.path.join(tb_dir, "train")
+        tb_val = os.path.join(tb_dir, "val")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        os.makedirs(config_dir, exist_ok=True)
+
+        payload = dict(vars(args))
+        payload["mlflow_run_id"] = run_id
+        payload["mlflow_experiment"] = OUTPLAY_MLFLOW_EXPERIMENT
+        payload["mlflow_tracking_uri"] = OUTPLAY_MLFLOW_URI
+        payload["run_dir"] = run_dir
+        payload["tensorboard_train"] = tb_train
+        payload["tensorboard_val"] = tb_val
+        with open(os.path.join(config_dir, "args.json"), "w") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        mlflow.log_params({key: str(value) for key, value in vars(args).items()})
+
+        print("Run directory:", run_dir)
+        print("TensorBoard directory:", tb_dir)
+        train_writer = None
+        val_writer = None
+        best_loss = float("inf")
+        try:
+            train_writer = SummaryWriter(log_dir=tb_train)
+            val_writer = SummaryWriter(log_dir=tb_val)
+            _log_train_gt_preview(train_writer, train_loader)
+            for epoch in range(0, args.no_epochs):
+                data_to_log_train = train(model, optimizer, train_loader, epoch, device, args)
+                with torch.no_grad():
+                    data_to_log_val = validate(
+                        model,
+                        val_loader,
+                        epoch,
+                        device,
+                        args,
+                        tb_writer=val_writer,
+                        image_indexes=OUTPLAY_VAL_IMAGE_INDEXES,
+                    )
+
+                train_writer.add_scalar("loss", data_to_log_train["train_loss"], epoch)
+                train_writer.add_scalar("cc", data_to_log_train["cc"], epoch)
+                train_writer.add_scalar("sim", data_to_log_train["sim"], epoch)
+                train_writer.add_scalar("lr", data_to_log_train["lr"], epoch)
+                val_writer.add_scalar("loss", data_to_log_val["val_loss"], epoch)
+                val_writer.add_scalar("cc", data_to_log_val["val_cc_loss"], epoch)
+                val_writer.add_scalar("sim", data_to_log_val["val_sim_loss"], epoch)
+                train_writer.flush()
+                val_writer.flush()
+
+                mlflow.log_metric("train_loss", data_to_log_train["train_loss"], step=epoch)
+                mlflow.log_metric("train_cc", data_to_log_train["cc"], step=epoch)
+                mlflow.log_metric("train_sim", data_to_log_train["sim"], step=epoch)
+                mlflow.log_metric("lr", data_to_log_train["lr"], step=epoch)
+                mlflow.log_metric("val_loss", data_to_log_val["val_loss"], step=epoch)
+                mlflow.log_metric("val_cc", data_to_log_val["val_cc_loss"], step=epoch)
+                mlflow.log_metric("val_sim", data_to_log_val["val_sim_loss"], step=epoch)
+
+                val_loss = data_to_log_val["val_loss"]
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    best_path = os.path.join(ckpt_dir, "best.pt")
+                    _save_checkpoint(model, best_path)
+                    print("[{:2d}, save, {}]".format(epoch, best_path))
+                if (epoch + 1) % args.save_every == 0:
+                    epoch_path = os.path.join(ckpt_dir, "epoch_%d.pt" % epoch)
+                    _save_checkpoint(model, epoch_path)
+                    _save_checkpoint(model, os.path.join(ckpt_dir, "last.pt"))
+                    print("[{:2d}, save, {}]".format(epoch, epoch_path))
+
+                if args.use_wandb:
+                    logged = {**data_to_log_train, **data_to_log_val}
+                    print(logged)
+                    wandb.log(logged)
+                if args.lr_sched:
+                    scheduler.step()
+        finally:
+            if train_writer is not None:
+                train_writer.close()
+            if val_writer is not None:
+                val_writer.close()
+
+
 summary(model, (3, args.clip_size, 224, 384), args.batch_size)
 
-best_model = None
-for epoch in range(0, args.no_epochs):
-    data_to_log_train = train(model, optimizer, train_loader, epoch, device, args)
-    
-    with torch.no_grad():
-        data_to_log_val = validate(model, val_loader, epoch, device, args)
+if args.dataset == "outplay":
+    _run_outplay(model, optimizer, train_loader, val_loader, device, args)
+else:
+    best_model = None
+    for epoch in range(0, args.no_epochs):
+        data_to_log_train = train(model, optimizer, train_loader, epoch, device, args)
 
-        val_loss = data_to_log_val['val_loss']
-        if epoch == 0 :
-            val_loss = np.inf
-            best_loss = val_loss
-        if val_loss <= best_loss:
-            best_loss = val_loss
-            best_model = model
+        with torch.no_grad():
+            data_to_log_val = validate(model, val_loader, epoch, device, args)
 
-            os.makedirs(os.path.dirname(args.model_save_path), exist_ok=True)
+            val_loss = data_to_log_val['val_loss']
+            if epoch == 0 :
+                val_loss = np.inf
+                best_loss = val_loss
+            if val_loss <= best_loss:
+                best_loss = val_loss
+                best_model = model
 
-            print('[{:2d},  save, {}]'.format(epoch, args.model_save_path))
-            if torch.cuda.device_count() > 1:    
-                torch.save(model.module.state_dict(), args.model_save_path)
-            else:
-                torch.save(model.state_dict(), args.model_save_path)
+                os.makedirs(os.path.dirname(args.model_save_path), exist_ok=True)
 
+                print('[{:2d},  save, {}]'.format(epoch, args.model_save_path))
+                if torch.cuda.device_count() > 1:
+                    torch.save(model.module.state_dict(), args.model_save_path)
+                else:
+                    torch.save(model.state_dict(), args.model_save_path)
 
-    data_to_log = {**data_to_log_train, **data_to_log_val}
+        data_to_log = {**data_to_log_train, **data_to_log_val}
 
-    if args.use_wandb:
-        print(data_to_log)
-        wandb.log(data_to_log)
+        if args.use_wandb:
+            print(data_to_log)
+            wandb.log(data_to_log)
 
-    if args.lr_sched:
-        scheduler.step()
+        if args.lr_sched:
+            scheduler.step()
 
 if args.use_wandb:
     wandb.finish()
