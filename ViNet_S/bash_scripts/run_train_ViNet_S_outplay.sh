@@ -10,6 +10,7 @@ CUDA_VISIBLE_DEVICES=0 /home/nitesh_sawadia/vinet_s/venv/bin/python train.py \
   --clip_size 32 \
   --batch_size 16 \
   --no_workers 8 \
+  --prefetch_factor 4 \
   --pin_memory True \
   --no_epochs 40 \
   --save_every 1 \

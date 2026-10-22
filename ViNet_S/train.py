@@ -52,6 +52,7 @@ parser.add_argument('--l1_coeff',default=1.0, type=float)
 parser.add_argument('--batch_size',default=8, type=int)
 parser.add_argument('--log_interval',default=5, type=int)
 parser.add_argument('--no_workers',default=2, type=int)
+parser.add_argument('--prefetch_factor',default=4, type=int)
 
 parser.add_argument('--clip_size',default=32, type=int)
 
@@ -211,8 +212,26 @@ elif args.dataset == "outplay":
     val_dataset = OutplayWindowDataset(args.split_root, "val", clip_size=args.clip_size)
 
 
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.no_workers, pin_memory=args.pin_memory)
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=args.no_workers, pin_memory=args.pin_memory)
+loader_kwargs = {
+    "num_workers": args.no_workers,
+    "pin_memory": args.pin_memory,
+}
+if args.no_workers > 0:
+    loader_kwargs["prefetch_factor"] = args.prefetch_factor
+    loader_kwargs["persistent_workers"] = True
+
+train_loader = torch.utils.data.DataLoader(
+    train_dataset,
+    batch_size=args.batch_size,
+    shuffle=True,
+    **loader_kwargs,
+)
+val_loader = torch.utils.data.DataLoader(
+    val_dataset,
+    batch_size=1,
+    shuffle=False,
+    **loader_kwargs,
+)
 
 
 def _coerce_state_dict(loaded):
@@ -385,9 +404,9 @@ def train(model, optimizer, loader, epoch, device, args):
         img_clips = sample[0]
         gt_sal = sample[1]
 
-        img_clips = img_clips.to(device)
+        img_clips = img_clips.to(device, non_blocking=args.pin_memory)
         img_clips = img_clips.permute((0,2,1,3,4))
-        gt_sal = gt_sal.to(device)
+        gt_sal = gt_sal.to(device, non_blocking=args.pin_memory)
         
         optimizer.zero_grad()
 
@@ -440,7 +459,7 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
         img_clips = sample[0]
         gt_sal = sample[1]
 
-        img_clips = img_clips.to(device)
+        img_clips = img_clips.to(device, non_blocking=args.pin_memory)
         img_clips = img_clips.permute((0,2,1,3,4))
         
 

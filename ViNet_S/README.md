@@ -10,7 +10,7 @@ Finetune ViNet-S on the sports outplay split. The local checkout is the source o
 - MLflow: `http://104.105.26.182:5000`, experiment `sports-saliency-ViNet-S`
 - TensorBoard logdir: `/home/nitesh_sawadia/vinet_s/tensorboard`
 
-The launch script trains for 40 epochs with 32-frame clips, batch size 16, 8 data workers, learning rate `1e-4`, and a checkpoint every epoch. Sample clips are written with `add_video` at 8 fps, one video for the frames and one for the saliency overlay.
+The launch script trains for 40 epochs with 32-frame clips, batch size 16, 8 data workers, a prefetch of 4 batches per worker, learning rate `1e-4`, and a checkpoint every epoch. Sample clips are written with `add_video` at 8 fps, one video for the frames and one for the saliency overlay.
 
 ## 1. Push the current commit
 
