@@ -1,7 +1,10 @@
 import argparse
 import datetime
+import glob
 import json
 import os
+import re
+import shutil
 import sys
 import time
 
@@ -94,10 +97,16 @@ parser.add_argument('--fold_lists_path',default='',type=str)
 
 parser.add_argument('--split_root', default=OUTPLAY_SPLIT_ROOT, type=str)
 parser.add_argument('--save_every', default=1, type=int)
+parser.add_argument('--resume', default='', type=str)
+parser.add_argument('--clear_tensorboard_media', action='store_true')
 
 
 
 args = parser.parse_args()
+
+if args.clear_tensorboard_media and not args.resume:
+    print("--clear_tensorboard_media requires --resume")
+    sys.exit(1)
 
 if args.dataset == "outplay":
     args.grouped_conv = True
@@ -260,12 +269,8 @@ def _strip_module_prefix(state):
     return stripped
 
 
-def _load_saliency_checkpoint(model, path):
-    if not os.path.isfile(path):
-        print("Saliency checkpoint not found: %s" % path)
-        sys.exit(1)
-    print("Loading pretrained saliency model weights:", path)
-    state = _strip_module_prefix(_coerce_state_dict(torch.load(path, map_location="cpu")))
+def _load_state_into_model(model, state):
+    state = _strip_module_prefix(state)
     try:
         model.load_state_dict(state, strict=True)
     except RuntimeError as exc:
@@ -281,10 +286,153 @@ def _load_saliency_checkpoint(model, path):
         for key in unexpected:
             print(key)
         sys.exit(1)
+
+
+def _load_saliency_checkpoint(model, path):
+    if not os.path.isfile(path):
+        print("Saliency checkpoint not found: %s" % path)
+        sys.exit(1)
+    print("Loading pretrained saliency model weights:", path)
+    _load_state_into_model(model, _coerce_state_dict(torch.load(path, map_location="cpu")))
     print("Loaded saliency checkpoint with strict=True")
 
 
-if args.checkpoint_path != "None":
+def _is_training_bundle(loaded):
+    model_state = loaded.get("model") if isinstance(loaded, dict) else None
+    return (
+        isinstance(model_state, dict)
+        and "epoch" in loaded
+        and bool(model_state)
+        and all(torch.is_tensor(value) for value in model_state.values())
+    )
+
+
+def _epoch_files(ckpt_dir):
+    found = []
+    if not os.path.isdir(ckpt_dir):
+        return found
+    for filename in os.listdir(ckpt_dir):
+        match = re.fullmatch(r"epoch_(\d+)\.pt", filename)
+        if match:
+            found.append((int(match.group(1)), os.path.join(ckpt_dir, filename)))
+    found.sort()
+    return found
+
+
+def _legacy_completed_epoch(path):
+    name = os.path.basename(path)
+    match = re.fullmatch(r"epoch_(\d+)\.pt", name)
+    if match:
+        print("Legacy weight file; completed epoch %s comes from the filename" % match.group(1))
+        return int(match.group(1))
+    if name == "last.pt":
+        epochs = _epoch_files(os.path.dirname(path))
+        if epochs:
+            epoch = epochs[-1][0]
+            print("Legacy weight file; completed epoch %d comes from the newest epoch_*.pt" % epoch)
+            return epoch
+    if name == "best.pt":
+        print("best.pt has no epoch or optimizer. Pass last.pt or epoch_<N>.pt to continue the counter.")
+    print("Checkpoint has no epoch; training starts at epoch 0 with these weights")
+    return None
+
+
+def _read_training_checkpoint(path):
+    loaded = torch.load(path, map_location="cpu")
+    if _is_training_bundle(loaded):
+        best_loss = loaded.get("best_loss")
+        if best_loss is None:
+            best_loss = float("inf")
+        optimizer_state = loaded.get("optimizer")
+        return {
+            "model": _strip_module_prefix(loaded["model"]),
+            "optimizer": optimizer_state,
+            "completed_epoch": int(loaded["epoch"]),
+            "best_loss": float(best_loss),
+            "has_optimizer": optimizer_state is not None,
+        }
+    completed = _legacy_completed_epoch(path)
+    return {
+        "model": _strip_module_prefix(_coerce_state_dict(loaded)),
+        "optimizer": None,
+        "completed_epoch": completed,
+        "best_loss": float("inf"),
+        "has_optimizer": False,
+    }
+
+
+def _find_run_dir(spec):
+    if not os.path.isdir(OUTPLAY_RUNS_ROOT):
+        print("Runs directory not found:", OUTPLAY_RUNS_ROOT)
+        sys.exit(1)
+    names = sorted(os.listdir(OUTPLAY_RUNS_ROOT))
+    matches = [name for name in names if name == spec or name.endswith("_" + spec)]
+    if len(matches) == 1:
+        return os.path.join(OUTPLAY_RUNS_ROOT, matches[0])
+    if not matches:
+        print("No run matches:", spec)
+        sys.exit(1)
+    print("Multiple runs match %s:" % spec)
+    for name in matches:
+        print(name)
+    sys.exit(1)
+
+
+def _resolve_resume(spec):
+    spec = os.path.expanduser(spec.strip())
+    if os.path.isfile(spec):
+        ckpt = os.path.abspath(spec)
+        parent = os.path.dirname(ckpt)
+        if os.path.basename(parent) != "checkpoints":
+            print("Resume checkpoint must be inside a run checkpoints directory:", ckpt)
+            sys.exit(1)
+        return os.path.dirname(parent), ckpt
+    if os.path.isdir(spec):
+        run_dir = os.path.abspath(spec)
+    else:
+        run_dir = _find_run_dir(spec)
+    ckpt_dir = os.path.join(run_dir, "checkpoints")
+    ckpt = os.path.join(ckpt_dir, "last.pt")
+    if not os.path.isfile(ckpt):
+        epochs = _epoch_files(ckpt_dir)
+        if not epochs:
+            print("No last.pt or epoch checkpoint in", run_dir)
+            sys.exit(1)
+        ckpt = epochs[-1][1]
+        print("last.pt not found; resuming from", ckpt)
+    return run_dir, ckpt
+
+
+def _mlflow_run_id(run_dir):
+    config_path = os.path.join(run_dir, "config", "args.json")
+    if os.path.isfile(config_path):
+        with open(config_path) as handle:
+            payload = json.load(handle)
+        run_id = payload.get("mlflow_run_id")
+        if run_id:
+            return run_id
+    name = os.path.basename(run_dir.rstrip("/"))
+    if "_" not in name:
+        print("Cannot find an MLflow run id for", run_dir)
+        sys.exit(1)
+    return name.rsplit("_", 1)[-1]
+
+
+resume_state = None
+if args.resume:
+    if args.dataset != "outplay":
+        print("--resume is only implemented for dataset=outplay")
+        sys.exit(1)
+    run_dir, ckpt_path = _resolve_resume(args.resume)
+    resume_state = _read_training_checkpoint(ckpt_path)
+    resume_state["run_dir"] = run_dir
+    resume_state["checkpoint_path"] = ckpt_path
+    print("Resuming run %s from %s" % (os.path.basename(run_dir), ckpt_path))
+    if args.checkpoint_path != "None":
+        print("--checkpoint_path is ignored because --resume loads this run")
+    _load_state_into_model(model, resume_state["model"])
+    print("Loaded resume weights with strict=True")
+elif args.checkpoint_path != "None":
     _load_saliency_checkpoint(model, args.checkpoint_path)
 elif os.path.isfile(file_weight):
     print ('loading kinetics weight file')
@@ -327,6 +475,15 @@ model.to(device)
 
 params = list(filter(lambda p: p.requires_grad, model.parameters())) 
 optimizer = torch.optim.Adam(params, lr=args.lr)
+if resume_state is not None and resume_state["has_optimizer"]:
+    optimizer.load_state_dict(resume_state["optimizer"])
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+    print("Restored optimizer state, lr", optimizer.param_groups[0]["lr"])
+elif resume_state is not None:
+    print("Checkpoint has no optimizer state; Adam starts fresh")
 
 print(device)
 
@@ -355,40 +512,138 @@ def _as_video(frames_tchw):
     return torch.from_numpy(np.ascontiguousarray(frames_tchw)).unsqueeze(0)
 
 
-def _log_clip_video(writer, clip_id, frames, maps, step, overlay_kind):
-    single_map = maps.dim() == 2
-    rgb_frames = []
-    overlay_frames = []
+def _saliency_map(sal_map):
+    sal_map = sal_map.detach()
+    if sal_map.dim() == 3 and sal_map.shape[0] == 1:
+        sal_map = sal_map[0]
+    return sal_map
+
+
+def _log_comparison_video(writer, clip_id, frames, gt_maps, pred_map, step):
+    """One 1x3 video: raw clip | ground-truth overlay | prediction overlay."""
+    pred = _saliency_map(pred_map)
+    panels = []
     for t in range(int(frames.shape[0])):
         frame = frames[t]
-        saliency = maps if single_map else maps[t]
-        rgb_frames.append(_denormalize_frame(frame))
-        overlay_frames.append(_jet_overlay(frame, saliency))
+        gt = gt_maps[t] if gt_maps.dim() == 3 else gt_maps
+        panel = np.concatenate(
+            [
+                _denormalize_frame(frame),
+                _jet_overlay(frame, _saliency_map(gt)),
+                _jet_overlay(frame, pred),
+            ],
+            axis=2,
+        )
+        panels.append(np.ascontiguousarray(panel))
     writer.add_video(
-        "samples/%s/clip" % clip_id,
-        _as_video(np.stack(rgb_frames, axis=0)),
-        step,
-        fps=8,
-    )
-    writer.add_video(
-        "samples/%s/%s" % (clip_id, overlay_kind),
-        _as_video(np.stack(overlay_frames, axis=0)),
+        "samples/%s" % clip_id,
+        _as_video(np.stack(panels, axis=0)),
         step,
         fps=8,
     )
 
 
-def _log_train_gt_preview(writer, loader):
+def _log_train_preview(writer, model, loader, device, pin_memory, step):
     batch = next(iter(loader))
     clips = batch[0]
     all_maps = batch[2]
-    for index in range(min(8, int(clips.shape[0]))):
-        _log_clip_video(writer, str(index), clips[index], all_maps[index], 0, "gt_overlay")
+    count = min(8, int(clips.shape[0]))
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        batch_clips = clips[:count].to(device, non_blocking=pin_memory)
+        preds = model(batch_clips.permute(0, 2, 1, 3, 4)).cpu()
+    if was_training:
+        model.train()
+    for index in range(count):
+        _log_comparison_video(
+            writer,
+            str(index),
+            clips[index],
+            all_maps[index],
+            preds[index],
+            step,
+        )
     writer.flush()
 
 
-def _save_checkpoint(model, path):
-    torch.save(model.state_dict(), path)
+def _save_training_state(path, model, optimizer, epoch, best_loss, run_name):
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": int(epoch),
+            "best_loss": float(best_loss),
+            "run_name": run_name,
+        },
+        path,
+    )
+
+
+def _drop_media(event):
+    if event.file_version:
+        return None, 0
+    if not event.summary.value:
+        return event, 0
+    kept = []
+    dropped = 0
+    for value in event.summary.value:
+        plugin = ""
+        if value.HasField("metadata") and value.metadata.HasField("plugin_data"):
+            plugin = value.metadata.plugin_data.plugin_name
+        if value.HasField("image") or plugin in ("images", "videos"):
+            dropped += 1
+            continue
+        kept.append(value)
+    if dropped == 0:
+        return event, 0
+    if not kept:
+        return None, dropped
+    from tensorboard.compat.proto.event_pb2 import Event
+
+    clone = Event()
+    clone.wall_time = event.wall_time
+    clone.step = event.step
+    clone.summary.CopyFrom(event.summary)
+    del clone.summary.value[:]
+    clone.summary.value.extend(kept)
+    return clone, dropped
+
+
+def _clear_tensorboard_media(logdir):
+    if not os.path.isdir(logdir):
+        print("TensorBoard directory not found:", logdir)
+        sys.exit(1)
+    paths = sorted(glob.glob(os.path.join(logdir, "events.out.tfevents.*")))
+    if not paths:
+        print("No TensorBoard event files in", logdir)
+        return
+    from tensorboard.backend.event_processing.event_file_loader import EventFileLoader
+    from tensorboard.summary.writer.event_file_writer import EventFileWriter
+
+    kept_events = []
+    removed = 0
+    for path in paths:
+        for event in EventFileLoader(path).Load():
+            filtered, dropped = _drop_media(event)
+            removed += dropped
+            if filtered is not None:
+                kept_events.append(filtered)
+    temp_dir = logdir.rstrip("/") + ".clearing"
+    if os.path.isdir(temp_dir):
+        shutil.rmtree(temp_dir)
+    writer = EventFileWriter(temp_dir)
+    try:
+        for event in kept_events:
+            writer.add_event(event)
+    finally:
+        writer.close()
+    for path in paths:
+        os.remove(path)
+    for name in os.listdir(temp_dir):
+        os.rename(os.path.join(temp_dir, name), os.path.join(logdir, name))
+    os.rmdir(temp_dir)
+    print("Removed %d image/video summaries from %s" % (removed, logdir))
 
 
 def train(model, optimizer, loader, epoch, device, args):
@@ -465,13 +720,13 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
 
         pred_sal = model(img_clips)
         if tb_writer is not None and idx in image_index_set:
-            _log_clip_video(
+            _log_comparison_video(
                 tb_writer,
                 str(idx),
                 sample[0][0],
+                sample[2][0],
                 pred_sal[0],
                 epoch,
-                "pred_overlay",
             )
         
         gt_sal = gt_sal.squeeze(0).numpy()
@@ -508,7 +763,7 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
 
     return data_to_log
 
-def _run_outplay(model, optimizer, train_loader, val_loader, device, args):
+def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resume_state):
     if args.save_every < 1:
         print("save_every must be >= 1")
         sys.exit(1)
@@ -520,44 +775,89 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args):
     import mlflow
     from torch.utils.tensorboard import SummaryWriter
 
+    if resume_state is None:
+        start_epoch = 0
+        best_loss = float("inf")
+    else:
+        completed = resume_state["completed_epoch"]
+        start_epoch = 0 if completed is None else completed + 1
+        best_loss = resume_state["best_loss"]
+        if start_epoch >= args.no_epochs:
+            print(
+                "Checkpoint finished epoch %d and --no_epochs is %d. Raise --no_epochs to continue."
+                % (start_epoch - 1, args.no_epochs)
+            )
+            sys.exit(1)
+        if not resume_state["has_optimizer"] and completed is not None:
+            print("Continuing at epoch %d. This checkpoint has weights only, so Adam starts fresh." % start_epoch)
+        if best_loss == float("inf"):
+            print("Best loss was not stored; best.pt updates when validation improves")
+
     mlflow.set_tracking_uri(OUTPLAY_MLFLOW_URI)
     mlflow.set_experiment(OUTPLAY_MLFLOW_EXPERIMENT)
-    utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if resume_state is None:
+        run_context = mlflow.start_run()
+    else:
+        run_context = mlflow.start_run(run_id=_mlflow_run_id(resume_state["run_dir"]))
 
-    with mlflow.start_run() as run:
-        run_id = run.info.run_id
-        run_name = "%s_%s" % (utc, run_id)
-        run_dir = os.path.join(OUTPLAY_RUNS_ROOT, run_name)
-        tb_dir = os.path.join(OUTPLAY_TB_ROOT, run_name)
-        ckpt_dir = os.path.join(run_dir, "checkpoints")
-        config_dir = os.path.join(run_dir, "config")
-        tb_train = os.path.join(tb_dir, "train")
-        tb_val = os.path.join(tb_dir, "val")
-        os.makedirs(ckpt_dir, exist_ok=True)
-        os.makedirs(config_dir, exist_ok=True)
-
-        payload = dict(vars(args))
-        payload["mlflow_run_id"] = run_id
-        payload["mlflow_experiment"] = OUTPLAY_MLFLOW_EXPERIMENT
-        payload["mlflow_tracking_uri"] = OUTPLAY_MLFLOW_URI
-        payload["run_dir"] = run_dir
-        payload["tensorboard_train"] = tb_train
-        payload["tensorboard_val"] = tb_val
-        with open(os.path.join(config_dir, "args.json"), "w") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        mlflow.log_params({key: str(value) for key, value in vars(args).items()})
+    with run_context as run:
+        if resume_state is None:
+            utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            run_id = run.info.run_id
+            run_name = "%s_%s" % (utc, run_id)
+            run_dir = os.path.join(OUTPLAY_RUNS_ROOT, run_name)
+            tb_dir = os.path.join(OUTPLAY_TB_ROOT, run_name)
+            ckpt_dir = os.path.join(run_dir, "checkpoints")
+            config_dir = os.path.join(run_dir, "config")
+            tb_train = os.path.join(tb_dir, "train")
+            tb_val = os.path.join(tb_dir, "val")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            os.makedirs(config_dir, exist_ok=True)
+            payload = dict(vars(args))
+            payload["mlflow_run_id"] = run_id
+            payload["mlflow_experiment"] = OUTPLAY_MLFLOW_EXPERIMENT
+            payload["mlflow_tracking_uri"] = OUTPLAY_MLFLOW_URI
+            payload["run_dir"] = run_dir
+            payload["tensorboard_train"] = tb_train
+            payload["tensorboard_val"] = tb_val
+            with open(os.path.join(config_dir, "args.json"), "w") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            mlflow.log_params({key: str(value) for key, value in vars(args).items()})
+        else:
+            run_dir = resume_state["run_dir"]
+            run_name = os.path.basename(run_dir.rstrip("/"))
+            tb_dir = os.path.join(OUTPLAY_TB_ROOT, run_name)
+            ckpt_dir = os.path.join(run_dir, "checkpoints")
+            config_dir = os.path.join(run_dir, "config")
+            tb_train = os.path.join(tb_dir, "train")
+            tb_val = os.path.join(tb_dir, "val")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            os.makedirs(config_dir, exist_ok=True)
+            config_path = os.path.join(config_dir, "args.json")
+            payload = {}
+            if os.path.isfile(config_path):
+                with open(config_path) as handle:
+                    payload = json.load(handle)
+            payload["resumed_from"] = resume_state["checkpoint_path"]
+            payload["resumed_at_epoch"] = start_epoch
+            with open(config_path, "w") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            if args.clear_tensorboard_media:
+                _clear_tensorboard_media(tb_train)
+                _clear_tensorboard_media(tb_val)
+            print("Continuing MLflow run", run.info.run_id, "at epoch", start_epoch)
 
         print("Run directory:", run_dir)
         print("TensorBoard directory:", tb_dir)
         train_writer = None
         val_writer = None
-        best_loss = float("inf")
         try:
             train_writer = SummaryWriter(log_dir=tb_train)
             val_writer = SummaryWriter(log_dir=tb_val)
-            _log_train_gt_preview(train_writer, train_loader)
-            for epoch in range(0, args.no_epochs):
+            _log_train_preview(train_writer, model, train_loader, device, args.pin_memory, start_epoch)
+            for epoch in range(start_epoch, args.no_epochs):
                 data_to_log_train = train(model, optimizer, train_loader, epoch, device, args)
                 with torch.no_grad():
                     data_to_log_val = validate(
@@ -592,12 +892,12 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args):
                 if val_loss < best_loss:
                     best_loss = val_loss
                     best_path = os.path.join(ckpt_dir, "best.pt")
-                    _save_checkpoint(model, best_path)
+                    _save_training_state(best_path, model, optimizer, epoch, best_loss, run_name)
                     print("[{:2d}, save, {}]".format(epoch, best_path))
                 if (epoch + 1) % args.save_every == 0:
                     epoch_path = os.path.join(ckpt_dir, "epoch_%d.pt" % epoch)
-                    _save_checkpoint(model, epoch_path)
-                    _save_checkpoint(model, os.path.join(ckpt_dir, "last.pt"))
+                    _save_training_state(epoch_path, model, optimizer, epoch, best_loss, run_name)
+                    _save_training_state(os.path.join(ckpt_dir, "last.pt"), model, optimizer, epoch, best_loss, run_name)
                     print("[{:2d}, save, {}]".format(epoch, epoch_path))
 
                 if args.use_wandb:
@@ -616,7 +916,7 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args):
 summary(model, (3, args.clip_size, 224, 384), args.batch_size)
 
 if args.dataset == "outplay":
-    _run_outplay(model, optimizer, train_loader, val_loader, device, args)
+    _run_outplay(model, optimizer, train_loader, val_loader, device, args, resume_state)
 else:
     best_model = None
     for epoch in range(0, args.no_epochs):

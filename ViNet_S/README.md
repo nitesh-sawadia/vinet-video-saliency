@@ -10,7 +10,7 @@ Finetune ViNet-S on the sports outplay split. The local checkout is the source o
 - MLflow: `http://104.105.26.182:5000`, experiment `sports-saliency-ViNet-S`
 - TensorBoard logdir: `/home/nitesh_sawadia/vinet_s/tensorboard`
 
-The launch script trains for 40 epochs with 32-frame clips, batch size 16, 8 data workers, a prefetch of 4 batches per worker, learning rate `1e-4`, and a checkpoint every epoch. Sample clips are written with `add_video` at 8 fps, one video for the frames and one for the saliency overlay.
+The launch script trains for 40 epochs with 32-frame clips, batch size 32, 8 data workers, a prefetch of 4 batches per worker, learning rate `1e-4`, and a checkpoint every epoch. Each sample clip is one 8 fps video laid out as a 1x3 grid: the frames, the ground-truth overlay, and the prediction overlay.
 
 ## 1. Push the current commit
 
@@ -157,7 +157,27 @@ ls -lt /home/nitesh_sawadia/vinet_s/runs
 ls -lt /home/nitesh_sawadia/vinet_s/tensorboard
 ```
 
-A run directory contains `config/args.json`, `checkpoints/best.pt`, `checkpoints/last.pt`, and `checkpoints/epoch_<N>.pt`. TensorBoard events are not stored inside that directory. They are under `/home/nitesh_sawadia/vinet_s/tensorboard/<same run name>/{train,val}`.
+A run directory contains `config/args.json`, `checkpoints/best.pt`, `checkpoints/last.pt`, and `checkpoints/epoch_<N>.pt`. Each of those files stores the model weights, the Adam state, the completed epoch, and the best validation loss. TensorBoard events are not stored inside that directory. They are under `/home/nitesh_sawadia/vinet_s/tensorboard/<same run name>/{train,val}`.
+
+## 9. Resume a run
+
+Stop the current process first. Resume continues that same directory and the same MLflow run. The epoch loop starts at the saved epoch plus one and runs until `--no_epochs`.
+
+From a run id or directory name, which loads `checkpoints/last.pt`:
+
+```bash
+--resume 245bd6b6570b48a2a78606a4588d5bed
+```
+
+From a checkpoint file inside that run's `checkpoints` directory:
+
+```bash
+--resume /home/nitesh_sawadia/vinet_s/runs/20261022T123825Z_245bd6b6570b48a2a78606a4588d5bed/checkpoints/last.pt
+```
+
+`--checkpoint_path` is ignored when `--resume` is set. Add `--clear_tensorboard_media` to drop logged images and videos from that run's TensorBoard events and keep the scalar curves. Checkpoints are not deleted.
+
+Weight files written before this resume support have no Adam state. Resuming one of those continues the epoch taken from `epoch_<N>.pt` and starts Adam fresh. The next checkpoint written by this code can be resumed in full.
 
 ## Sync later changes
 
