@@ -331,25 +331,40 @@ def _jet_overlay(frame_chw, sal_hw):
     return np.ascontiguousarray(np.transpose(np.clip(blended, 0.0, 1.0), (2, 0, 1)))
 
 
-def _log_clip_images(writer, clip_id, frames, maps, step, overlay_kind):
+def _as_video(frames_tchw):
+    # add_video wants (N, T, C, H, W). N=1 keeps one clip instead of a padded grid.
+    return torch.from_numpy(np.ascontiguousarray(frames_tchw)).unsqueeze(0)
+
+
+def _log_clip_video(writer, clip_id, frames, maps, step, overlay_kind):
     single_map = maps.dim() == 2
+    rgb_frames = []
+    overlay_frames = []
     for t in range(int(frames.shape[0])):
         frame = frames[t]
-        writer.add_image("samples/%s/frame/%d" % (clip_id, t), _denormalize_frame(frame), step)
         saliency = maps if single_map else maps[t]
-        writer.add_image(
-            "samples/%s/%s/%d" % (clip_id, overlay_kind, t),
-            _jet_overlay(frame, saliency),
-            step,
-        )
+        rgb_frames.append(_denormalize_frame(frame))
+        overlay_frames.append(_jet_overlay(frame, saliency))
+    writer.add_video(
+        "samples/%s/clip" % clip_id,
+        _as_video(np.stack(rgb_frames, axis=0)),
+        step,
+        fps=8,
+    )
+    writer.add_video(
+        "samples/%s/%s" % (clip_id, overlay_kind),
+        _as_video(np.stack(overlay_frames, axis=0)),
+        step,
+        fps=8,
+    )
 
 
 def _log_train_gt_preview(writer, loader):
     batch = next(iter(loader))
     clips = batch[0]
     all_maps = batch[2]
-    for index in range(int(clips.shape[0])):
-        _log_clip_images(writer, str(index), clips[index], all_maps[index], 0, "gt_overlay")
+    for index in range(min(8, int(clips.shape[0]))):
+        _log_clip_video(writer, str(index), clips[index], all_maps[index], 0, "gt_overlay")
     writer.flush()
 
 
@@ -431,7 +446,7 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
 
         pred_sal = model(img_clips)
         if tb_writer is not None and idx in image_index_set:
-            _log_clip_images(
+            _log_clip_video(
                 tb_writer,
                 str(idx),
                 sample[0][0],
