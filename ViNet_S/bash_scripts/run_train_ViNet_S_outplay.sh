@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 /home/nitesh_sawadia/vinet_s/venv/bin/python train.py \
   --pin_memory True \
   --no_epochs 40 \
   --save_every 1 \
-  --lr 1e-4 \
+  --lr 1e-5 \
   --num_hier 3 \
   --grouped_conv True \
   --root_grouping True
