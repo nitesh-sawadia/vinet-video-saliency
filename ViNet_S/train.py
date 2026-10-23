@@ -170,16 +170,20 @@ if args.use_wandb:
         wandb.run.name += "_pinned"
 
 
-model = VideoSaliencyModel(
-    use_upsample=bool(args.decoder_upsample),
-    num_hier=args.num_hier,
-    num_clips=args.clip_size,
-    grouped_conv=args.grouped_conv,
-    root_grouping=args.root_grouping,
-    depth=args.depth_grouping,
-    efficientnet=args.efficientnet,
-    BiCubic = not args.use_trilinear_upsampling,
-)
+def _build_saliency_model(args):
+    return VideoSaliencyModel(
+        use_upsample=bool(args.decoder_upsample),
+        num_hier=args.num_hier,
+        num_clips=args.clip_size,
+        grouped_conv=args.grouped_conv,
+        root_grouping=args.root_grouping,
+        depth=args.depth_grouping,
+        efficientnet=args.efficientnet,
+        BiCubic=not args.use_trilinear_upsampling,
+    )
+
+
+model = _build_saliency_model(args)
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -527,7 +531,7 @@ def _saliency_map(sal_map):
     return sal_map
 
 
-def _log_comparison_video(writer, clip_id, frames, gt_maps, pred_map, step):
+def _log_comparison_video(writer, clip_id, frames, gt_maps, pred_map, step, tag="samples/%s"):
     """One 1x3 video: raw clip | ground-truth overlay | prediction overlay."""
     pred = _saliency_map(pred_map)
     panels = []
@@ -544,7 +548,7 @@ def _log_comparison_video(writer, clip_id, frames, gt_maps, pred_map, step):
         )
         panels.append(np.ascontiguousarray(panel))
     writer.add_video(
-        "samples/%s" % clip_id,
+        tag % clip_id,
         _as_video(np.stack(panels, axis=0)),
         step,
         fps=8,
@@ -573,6 +577,39 @@ def _log_train_preview(writer, model, loader, device, pin_memory, step):
             step,
         )
     writer.flush()
+
+
+def _log_pretrained_validation(writer, dataset, device, pin_memory, checkpoint_path, indexes):
+    """Log the initial checkpoint on the fixed validation clips. The training model is left unchanged."""
+    if checkpoint_path in ("", "None") or not os.path.isfile(checkpoint_path):
+        print("Pretrained validation videos skipped; checkpoint not found:", checkpoint_path)
+        return
+    pretrained = _build_saliency_model(args)
+    _load_saliency_checkpoint(pretrained, checkpoint_path)
+    pretrained.to(device)
+    pretrained.eval()
+    try:
+        with torch.no_grad():
+            for index in indexes:
+                clip, _gt, all_maps = dataset[index]
+                pred = pretrained(
+                    clip.unsqueeze(0).to(device, non_blocking=pin_memory).permute(0, 2, 1, 3, 4)
+                )
+                _log_comparison_video(
+                    writer,
+                    str(index),
+                    clip,
+                    all_maps,
+                    pred[0].cpu(),
+                    0,
+                    tag="pretrained/%s",
+                )
+        writer.flush()
+    finally:
+        del pretrained
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    print("Logged pretrained validation videos from", checkpoint_path)
 
 
 def _save_training_state(path, model, optimizer, epoch, best_loss, run_name):
@@ -864,6 +901,14 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resum
         try:
             train_writer = SummaryWriter(log_dir=tb_train)
             val_writer = SummaryWriter(log_dir=tb_val)
+            _log_pretrained_validation(
+                val_writer,
+                val_loader.dataset,
+                device,
+                args.pin_memory,
+                args.checkpoint_path,
+                OUTPLAY_VAL_IMAGE_INDEXES,
+            )
             _log_train_preview(train_writer, model, train_loader, device, args.pin_memory, start_epoch)
             for epoch in range(start_epoch, args.no_epochs):
                 data_to_log_train = train(model, optimizer, train_loader, epoch, device, args)
