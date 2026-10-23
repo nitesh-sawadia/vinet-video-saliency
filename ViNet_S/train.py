@@ -493,13 +493,21 @@ def _denormalize_frame(frame_chw):
     return np.clip(image, 0.0, 1.0).astype(np.float32, copy=False)
 
 
+def _minmax_for_display(sal):
+    low = float(np.min(sal))
+    high = float(np.max(sal))
+    if high <= low:
+        return np.zeros_like(sal, dtype=np.float32)
+    return ((sal - low) / (high - low)).astype(np.float32, copy=False)
+
+
 def _jet_overlay(frame_chw, sal_hw):
     frame = _denormalize_frame(frame_chw)
     sal = sal_hw.detach().float().cpu().numpy()
     height, width = frame.shape[1], frame.shape[2]
     if sal.shape != (height, width):
         sal = cv2.resize(sal, (width, height), interpolation=cv2.INTER_LINEAR)
-    sal = np.clip(sal, 0.0, 1.0)
+    sal = _minmax_for_display(sal)
     heat_bgr = cv2.applyColorMap(np.round(sal * 255.0).astype(np.uint8), cv2.COLORMAP_JET)
     heat = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     frame_hwc = np.transpose(frame, (1, 2, 0))
@@ -733,7 +741,7 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
 
         pred_sal = pred_sal.cpu().squeeze(0).numpy()
         pred_sal = cv2.resize(pred_sal, (gt_sal.shape[1], gt_sal.shape[0]))
-        pred_sal = blur(pred_sal).unsqueeze(0).cuda()
+        pred_sal = torch.FloatTensor(pred_sal).unsqueeze(0).cuda()
 
         gt_sal = torch.FloatTensor(gt_sal).unsqueeze(0).cuda()
 
