@@ -6,7 +6,7 @@ Finetune ViNet-S on the sports outplay split. The local checkout is the source o
 - Repo on the VM: `/home/nitesh_sawadia/vinet_s/vinet-video-saliency`
 - Virtualenv: `/home/nitesh_sawadia/vinet_s/venv`
 - Checkpoint: `/home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt`
-- Dataset mount: `/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split` (goofys over Linode). Cohub is optional; see [`docs/cohub.md`](../docs/cohub.md).
+- Dataset mount: `/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8` (goofys over Linode). 32-frame windows sampled every 8 frames. Cohub is optional; see [`docs/cohub.md`](../docs/cohub.md).
 - MLflow: `http://104.105.26.182:5000`, experiment `sports-saliency-ViNet-S`
 - TensorBoard logdir: `/home/nitesh_sawadia/vinet_s/tensorboard`
 
@@ -63,7 +63,7 @@ mountpoint -q /home/nitesh_sawadia/mnt/ml-fanpulse || \
 ```
 
 ```bash
-DATA_ROOT=/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split
+DATA_ROOT=/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8
 
 test -f "$DATA_ROOT/split_manifest.json"
 ls -lh "$DATA_ROOT/split_manifest.json"

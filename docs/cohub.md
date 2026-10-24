@@ -110,8 +110,8 @@ lakefs://sports-outplay-saliency-vinet/v1
 `--dataset_version` is optional. With it omitted, `train.py` does not call
 `cohub` and reads whatever `--split_root` points at. The launch script
 defaults to the Linode goofys mount
-`/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split`,
-which is the previous training setting. See
+`/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8`,
+the stride-8 Linode split. See
 [`ViNet_S/README.md`](../ViNet_S/README.md) for that runbook.
 
 To pin a run to this dataset:

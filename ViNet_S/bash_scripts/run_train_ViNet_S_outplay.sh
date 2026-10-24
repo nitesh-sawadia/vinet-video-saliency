@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 CUDA_VISIBLE_DEVICES=0 /home/nitesh_sawadia/vinet_s/venv/bin/python train.py \
   --dataset outplay \
-  --split_root /home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split \
+  --split_root /home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8 \
   --checkpoint_path /home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt \
   --clip_size 32 \
   --batch_size 32 \

@@ -23,7 +23,7 @@ from utils import *
 
 OUTPLAY_MLFLOW_URI = "http://104.105.26.182:5000"
 OUTPLAY_MLFLOW_EXPERIMENT = "sports-saliency-ViNet-S"
-OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split"
+OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8"
 OUTPLAY_RUNS_ROOT = "/home/nitesh_sawadia/vinet_s/runs"
 OUTPLAY_TB_ROOT = "/home/nitesh_sawadia/vinet_s/tensorboard"
 OUTPLAY_VAL_IMAGE_INDEXES = (0, 65, 130, 195, 260, 325, 390, 455)
