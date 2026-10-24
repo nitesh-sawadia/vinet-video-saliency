@@ -69,6 +69,16 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--num-workers", type=int, default=2)
     render.add_argument("--device", default=None)
     render.add_argument("--fps", type=int, default=8)
+    render.add_argument(
+        "--ids",
+        default=None,
+        help="Comma-separated hard-example ids to re-render (default: all hard)",
+    )
+    render.add_argument(
+        "--refresh-panels",
+        action="store_true",
+        help="Overwrite last-frame panels as well as 32-frame clips",
+    )
 
     run = sub.add_parser("run", help="score + classify (+ optional review)")
     run.add_argument("--checkpoint", required=True)
@@ -142,6 +152,9 @@ def main(argv=None) -> int:
     if args.command == "render-clips":
         from render_clips import render_hard_clips
 
+        ids = None
+        if args.ids:
+            ids = [item.strip() for item in args.ids.split(",") if item.strip()]
         render_hard_clips(
             out_dir=args.out,
             checkpoint_path=args.checkpoint,
@@ -150,6 +163,8 @@ def main(argv=None) -> int:
             num_workers=args.num_workers,
             device_name=args.device,
             fps=args.fps,
+            ids=ids,
+            refresh_panels=args.refresh_panels,
         )
         return 0
 

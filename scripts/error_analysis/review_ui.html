@@ -75,6 +75,11 @@
     }
     .bucket .name { display: block; font-weight: 600; }
     .bucket .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .tag.regen {
+      background: rgba(139, 213, 181, 0.18);
+      border: 1px solid rgba(139, 213, 181, 0.45);
+      color: var(--accent-2);
+    }
     .filters {
       display: flex;
       gap: 10px;
@@ -218,10 +223,20 @@
     }
 
     function renderBuckets() {
-      const counts = { all: DATA.samples.length, ...(DATA.bucket_counts || {}) };
-      const order = ["all", ...DATA.hypotheses.map(h => h.id).filter(id => counts[id])];
+      const regenCount = DATA.samples.filter(s => s.gt_regenerated).length;
+      const counts = {
+        all: DATA.samples.length,
+        gt_regenerated: regenCount,
+        ...(DATA.bucket_counts || {}),
+      };
+      const order = [
+        "all",
+        ...(regenCount ? ["gt_regenerated"] : []),
+        ...DATA.hypotheses.map(h => h.id).filter(id => counts[id]),
+      ];
       const titles = Object.fromEntries(DATA.hypotheses.map(h => [h.id, h.title]));
       titles.all = "All hard examples";
+      titles.gt_regenerated = "GT regenerated";
       const root = document.getElementById("buckets");
       root.innerHTML = "";
       order.forEach(id => {
@@ -239,7 +254,9 @@
       const sport = document.getElementById("sport").value;
       const sort = document.getElementById("sort").value;
       let rows = DATA.samples.slice();
-      if (activeBucket !== "all") {
+      if (activeBucket === "gt_regenerated") {
+        rows = rows.filter(s => s.gt_regenerated);
+      } else if (activeBucket !== "all") {
         rows = rows.filter(s => s.primary_hypothesis === activeBucket ||
           (s.secondary_hypotheses || []).includes(activeBucket));
       }
@@ -270,6 +287,9 @@
           "<span class='tag" + (i ? " secondary" : "") + "'>" +
           c.id + " · " + (c.confidence || 0).toFixed(2) + "</span>"
         ).join("");
+        const regenTag = s.gt_regenerated
+          ? "<span class='tag regen'>GT regenerated → person</span>"
+          : "";
         const rationale = ((s.confirmed || [])[0] || {}).rationale || s.vlm_notes || "";
         return "<article class='card'>" +
           "<div class='card-head'><div><h2>" + s.id + "</h2>" +
@@ -282,22 +302,23 @@
           "</strong></div></div>" +
           "<div class='legend'><span>32-frame clip @ 8fps</span><span>Left: frame</span><span>Middle: GT overlay</span><span>Right: prediction</span></div>" +
           mediaFor(s) +
-          "<div class='tags'>" + confirmed + "</div>" +
+          "<div class='tags'>" + regenTag + confirmed + "</div>" +
           (rationale ? "<div class='rationale'>" + escapeHtml(rationale) + "</div>" : "") +
           "</article>";
       }).join("");
     }
 
     function mediaFor(s) {
+      const bust = s.media_version ? ("?v=" + encodeURIComponent(s.media_version)) : "";
       if (s.clip) {
-        const src = s.clip;
-        if (src.endsWith(".webp") || src.endsWith(".gif")) {
+        const src = s.clip + bust;
+        if (s.clip.endsWith(".webp") || s.clip.endsWith(".gif")) {
           return "<img class='panel-img' loading='lazy' src='" + src + "' alt='32-frame clip' />";
         }
         return "<video class='clip-video' src='" + src + "' controls autoplay muted loop playsinline></video>";
       }
       if (s.panel) {
-        return "<img class='panel-img' loading='lazy' src='" + s.panel + "' alt='last-frame panel' />";
+        return "<img class='panel-img' loading='lazy' src='" + s.panel + bust + "' alt='last-frame panel' />";
       }
       return "";
     }

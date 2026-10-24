@@ -37,6 +37,8 @@ def render_hard_clips(
     num_workers: int = 2,
     device_name: str | None = None,
     fps: int = 8,
+    ids: list[str] | None = None,
+    refresh_panels: bool = False,
 ) -> dict:
     """Re-infer hard examples and write clips/<id>.mp4 (full 32-frame panels)."""
     from features import compute_map_features, compute_temporal_features
@@ -51,6 +53,12 @@ def render_hard_clips(
         raise SystemExit("Missing scores.jsonl in %s" % out_dir)
     rows = _read_jsonl(scores_path)
     hard = [row for row in rows if row.get("hard")]
+    if ids:
+        want = {str(item) for item in ids}
+        hard = [row for row in hard if str(row.get("id")) in want]
+        missing = want - {str(row.get("id")) for row in hard}
+        if missing:
+            print("warning: ids not in hard set:", ", ".join(sorted(missing)), flush=True)
     if not hard:
         raise SystemExit("No hard examples flagged in %s" % scores_path)
 
@@ -130,7 +138,7 @@ def render_hard_clips(
                 row["features"] = feats
                 panel_rel = row.get("panel") or os.path.join("panels", "%s.png" % row["id"])
                 panel_abs = os.path.join(out_dir, panel_rel)
-                if not os.path.isfile(panel_abs):
+                if refresh_panels or not os.path.isfile(panel_abs):
                     save_panel(panel_abs, clips_cpu[b, -1], maps_cpu[b, -1], preds_cpu[b])
                     row["panel"] = panel_rel.replace("\\", "/")
                 done += 1
