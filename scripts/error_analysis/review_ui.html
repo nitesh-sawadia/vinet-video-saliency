@@ -116,7 +116,7 @@
       font-size: 12px;
     }
     .metrics span strong { color: var(--text); font-weight: 600; }
-    .panel-img {
+    .panel-img, .clip-video {
       width: 100%;
       max-width: 1100px;
       border-radius: 8px;
@@ -124,6 +124,7 @@
       background: #000;
       display: block;
     }
+    .clip-video { aspect-ratio: 1152 / 224; }
     .legend {
       display: flex;
       gap: 16px;
@@ -279,12 +280,26 @@
           "</strong></span></div></div>" +
           "<div class='metrics'><strong>" + (s.title || s.primary_hypothesis) +
           "</strong></div></div>" +
-          "<div class='legend'><span>Left: frame</span><span>Middle: GT overlay</span><span>Right: prediction</span></div>" +
-          (s.panel ? "<img class='panel-img' loading='lazy' src='" + s.panel + "' alt='panel' />" : "") +
+          "<div class='legend'><span>32-frame clip @ 8fps</span><span>Left: frame</span><span>Middle: GT overlay</span><span>Right: prediction</span></div>" +
+          mediaFor(s) +
           "<div class='tags'>" + confirmed + "</div>" +
           (rationale ? "<div class='rationale'>" + escapeHtml(rationale) + "</div>" : "") +
           "</article>";
       }).join("");
+    }
+
+    function mediaFor(s) {
+      if (s.clip) {
+        const src = s.clip;
+        if (src.endsWith(".webp") || src.endsWith(".gif")) {
+          return "<img class='panel-img' loading='lazy' src='" + src + "' alt='32-frame clip' />";
+        }
+        return "<video class='clip-video' src='" + src + "' controls autoplay muted loop playsinline></video>";
+      }
+      if (s.panel) {
+        return "<img class='panel-img' loading='lazy' src='" + s.panel + "' alt='last-frame panel' />";
+      }
+      return "";
     }
 
     function escapeHtml(text) {

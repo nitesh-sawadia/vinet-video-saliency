@@ -188,7 +188,7 @@ def score_validation(
 ) -> dict:
     """Write scores.jsonl + summary.json. Returns summary dict."""
     from features import compute_map_features
-    from viz import denormalize_frame_chw, save_panel, load_rgb_u8
+    from viz import denormalize_frame_chw, save_panel, save_clip_video, load_rgb_u8
 
     _ensure_vinet_path()
     from outplay_dataset import OutplayWindowDataset, frame_names
@@ -296,33 +296,33 @@ def score_validation(
     hard_ids = {row["id"] for row in ranked[:n_hard]}
 
     print(
-        "Writing %d hard-example panels from cached batched preds (no re-infer)..."
+        "Writing %d hard-example panels + 32-frame clips from cached preds..."
         % n_hard,
         flush=True,
     )
+    clips_dir = os.path.join(out_dir, "clips")
+    os.makedirs(clips_dir, exist_ok=True)
     for row in ranked[:n_hard]:
         index = row["index"]
         pred = pred_cache[index]
+        # Full clip reload for the 32-frame video (pred stays cached).
+        clip_t, gt_t, all_maps = dataset[index]
+        clip_np = clip_t.numpy()
+        gt_np = gt_t.numpy()
+        maps_np = all_maps.numpy()
         last_frame = frame_cache[index]
-        # GT for the panel: reload only maps/0032 (dataset __getitem__ would
-        # re-read the full 32-frame clip; pull the map file directly).
-        gt_path = os.path.join(row["path"], "maps", "0032.png")
-        gt_img = cv2.imread(gt_path, cv2.IMREAD_GRAYSCALE)
-        if gt_img is None:
-            # Fallback to full sample load if the single map read fails.
-            _clip, gt_t, _ = dataset[index]
-            gt_np = gt_t.numpy()
-            del _clip
-        else:
-            if gt_img.shape != pred.shape:
-                gt_img = cv2.resize(gt_img, (pred.shape[1], pred.shape[0]), interpolation=cv2.INTER_LINEAR)
-            gt_np = gt_img.astype(np.float32)
-            if gt_np.max() > 1.0:
-                gt_np = gt_np / 255.0
 
         panel_rel = os.path.join("panels", "%s.png" % row["id"])
         panel_abs = os.path.join(out_dir, panel_rel)
         save_panel(panel_abs, last_frame, gt_np, pred)
+        clip_abs = save_clip_video(
+            os.path.join(clips_dir, "%s.webp" % row["id"]),
+            clip_np,
+            maps_np,
+            pred,
+            fps=8,
+        )
+        clip_rel = os.path.relpath(clip_abs, out_dir).replace("\\", "/")
         clip_rgbs = [
             load_rgb_u8(os.path.join(row["path"], "images", name))
             for name in frame_names()[::4]
@@ -340,6 +340,7 @@ def score_validation(
         )
         row["features"] = feats
         row["panel"] = panel_rel
+        row["clip"] = clip_rel
         row["hard"] = True
 
     for row in rows:

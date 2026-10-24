@@ -58,6 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--port", type=int, default=8765)
     review.add_argument("--no-browser", action="store_true")
 
+    render = sub.add_parser(
+        "render-clips",
+        help="Render 32-frame comparison videos for hard examples",
+    )
+    render.add_argument("--out", required=True, help="Directory produced by score")
+    render.add_argument("--checkpoint", required=True)
+    render.add_argument("--split-root", default=None, help="Defaults to summary.json split_root")
+    render.add_argument("--batch-size", type=int, default=8)
+    render.add_argument("--num-workers", type=int, default=2)
+    render.add_argument("--device", default=None)
+    render.add_argument("--fps", type=int, default=8)
+
     run = sub.add_parser("run", help="score + classify (+ optional review)")
     run.add_argument("--checkpoint", required=True)
     run.add_argument("--split-root", required=True)
@@ -124,6 +136,20 @@ def main(argv=None) -> int:
             host=args.host,
             port=args.port,
             open_browser=not args.no_browser,
+        )
+        return 0
+
+    if args.command == "render-clips":
+        from render_clips import render_hard_clips
+
+        render_hard_clips(
+            out_dir=args.out,
+            checkpoint_path=args.checkpoint,
+            split_root=args.split_root,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            device_name=args.device,
+            fps=args.fps,
         )
         return 0
 

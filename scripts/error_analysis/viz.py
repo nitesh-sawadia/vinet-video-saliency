@@ -60,6 +60,59 @@ def save_panel(path: str, frame_chw, gt_hw, pred_hw) -> None:
     Image.fromarray(panel).save(path)
 
 
+def save_clip_video(
+    path: str,
+    frames_tchw,
+    gt_maps_thw,
+    pred_hw,
+    fps: int = 8,
+) -> str:
+    """Write a 32-frame comparison clip: raw | GT overlay | pred overlay.
+
+    Saves an animated WebP (browser-friendly) at ``path`` with a ``.webp``
+    suffix if needed. Also writes a side-car ``.mp4`` when OpenCV can encode.
+    Returns the WebP path used for the review UI.
+    """
+    frames = np.asarray(frames_tchw)
+    gts = np.asarray(gt_maps_thw)
+    pred = np.asarray(pred_hw, dtype=np.float32)
+    if frames.ndim != 4:
+        raise ValueError("frames must be TCHW, got %s" % (frames.shape,))
+    if gts.ndim != 3:
+        raise ValueError("gt maps must be THW, got %s" % (gts.shape,))
+    if pred.ndim == 3 and pred.shape[0] == 1:
+        pred = pred[0]
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    root, ext = os.path.splitext(path)
+    webp_path = path if ext.lower() == ".webp" else root + ".webp"
+    panels = [build_panel_u8(frames[t], gts[t], pred) for t in range(frames.shape[0])]
+    images = [Image.fromarray(panel) for panel in panels]
+    duration_ms = max(1, int(round(1000.0 / float(fps))))
+    images[0].save(
+        webp_path,
+        format="WEBP",
+        save_all=True,
+        append_images=images[1:],
+        duration=duration_ms,
+        loop=0,
+        quality=80,
+        method=4,
+    )
+
+    mp4_path = root + ".mp4"
+    height, width = panels[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(mp4_path, fourcc, float(fps), (width, height))
+    if writer.isOpened():
+        try:
+            for panel in panels:
+                writer.write(cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+        finally:
+            writer.release()
+    return webp_path
+
+
 def load_rgb_u8(path: str, size_wh=(384, 224)) -> np.ndarray:
     image = Image.open(path).convert("RGB")
     if image.size != size_wh:
