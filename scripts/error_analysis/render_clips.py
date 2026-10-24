@@ -76,9 +76,25 @@ def render_hard_clips(
     model, _meta = load_model(checkpoint_path, device)
     dataset = OutplayWindowDataset(split_root, "val", clip_size=32, validate=False)
 
-    # Map index -> row for updates.
-    by_index = {int(row["index"]): row for row in rows}
-    hard_indexes = [int(row["index"]) for row in hard]
+    # Resolve by on-disk path. Score indexes go stale when split_manifest is filtered.
+    path_to_index = {path: index for index, path in enumerate(dataset.paths)}
+    by_id = {str(row["id"]): row for row in rows}
+    hard_indexes: list[int] = []
+    hard_rows: list[dict] = []
+    skipped = []
+    for row in hard:
+        path = row.get("path") or os.path.join(split_root, row.get("relpath") or "")
+        index = path_to_index.get(path)
+        if index is None:
+            skipped.append(str(row.get("id")))
+            continue
+        hard_indexes.append(index)
+        hard_rows.append(by_id[str(row["id"])])
+    if skipped:
+        print("warning: missing from current split:", ", ".join(skipped), flush=True)
+    if not hard_indexes:
+        raise SystemExit("No requested hard examples remain in the current split")
+
     subset = Subset(dataset, hard_indexes)
     loader = DataLoader(
         subset,
@@ -97,7 +113,7 @@ def render_hard_clips(
         for batch in loader:
             clips, _gts, all_maps = batch
             bsz = int(clips.shape[0])
-            indexes = hard_indexes[cursor : cursor + bsz]
+            batch_rows = hard_rows[cursor : cursor + bsz]
             cursor += bsz
             clips_dev = clips.to(device, non_blocking=True)
             preds = _squeeze_pred(model(clips_dev.permute(0, 2, 1, 3, 4)))
@@ -108,8 +124,7 @@ def render_hard_clips(
             clips_cpu = clips.detach().cpu().numpy()
             maps_cpu = all_maps.detach().cpu().numpy()
 
-            for b, index in enumerate(indexes):
-                row = by_index[index]
+            for b, row in enumerate(batch_rows):
                 clip_abs = save_clip_video(
                     os.path.join(clips_dir, "%s.webp" % row["id"]),
                     clips_cpu[b],
@@ -143,21 +158,30 @@ def render_hard_clips(
                     row["panel"] = panel_rel.replace("\\", "/")
                 done += 1
             print(
-                "clips %d/%d  elapsed=%.1fs" % (done, len(hard), time.time() - tic),
+                "clips %d/%d  elapsed=%.1fs" % (done, len(hard_rows), time.time() - tic),
                 flush=True,
             )
 
     _release_cuda_after_inference(model, loader)
     _write_jsonl(scores_path, rows)
 
+    refreshed_ids = {str(row["id"]) for row in hard_rows}
     # Refresh review_index.json if classify already ran.
     review_path = os.path.join(out_dir, "review_index.json")
     if os.path.isfile(review_path):
         with open(review_path) as handle:
             review = json.load(handle)
         clip_by_id = {row["id"]: row.get("clip") for row in rows if row.get("hard")}
+        panel_by_id = {row["id"]: row.get("panel") for row in rows if row.get("hard")}
         for sample in review.get("samples") or []:
-            sample["clip"] = clip_by_id.get(sample["id"])
+            sample_id = sample.get("id")
+            if sample_id in clip_by_id:
+                sample["clip"] = clip_by_id[sample_id]
+            if sample_id in panel_by_id and panel_by_id[sample_id]:
+                sample["panel"] = panel_by_id[sample_id]
+            if sample_id in refreshed_ids:
+                sample["gt_regenerated"] = True
+                sample["media_version"] = "gt-regen"
         with open(review_path, "w") as handle:
             json.dump(review, handle, indent=2)
             handle.write("\n")
@@ -168,8 +192,16 @@ def render_hard_clips(
         with open(analysis_path) as handle:
             analysis = json.load(handle)
         clip_by_id = {row["id"]: row.get("clip") for row in rows if row.get("hard")}
+        panel_by_id = {row["id"]: row.get("panel") for row in rows if row.get("hard")}
         for sample in analysis.get("samples") or []:
-            sample["clip"] = clip_by_id.get(sample["id"])
+            sample_id = sample.get("id")
+            if sample_id in clip_by_id:
+                sample["clip"] = clip_by_id[sample_id]
+            if sample_id in panel_by_id and panel_by_id[sample_id]:
+                sample["panel"] = panel_by_id[sample_id]
+            if sample_id in refreshed_ids:
+                sample["gt_regenerated"] = True
+                sample["media_version"] = "gt-regen"
         with open(analysis_path, "w") as handle:
             json.dump(analysis, handle, indent=2)
             handle.write("\n")
