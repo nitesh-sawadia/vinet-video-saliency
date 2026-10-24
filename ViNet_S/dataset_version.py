@@ -1,12 +1,14 @@
-"""Cohub dataset-version pin for outplay training.
+"""Optional Cohub dataset-version pin for outplay training.
 
-New outplay runs must pass --dataset_version lakefs://<repo>/<tag> (repo,
-then tag -- not lakefs://datasets/...). At startup this downloads that
-tag's split_manifest.json with the Cohub CLI and checks it against the
-mounted split, so training never silently runs against the wrong data
-version. Frame reads stay on the mounted split; Cohub is only the version
-check, not the file server. --resume additionally checks the flag against
-the URI stored in that run's args.json and exits if they disagree.
+--dataset_version is off unless set. With it omitted, training reads
+whatever --split_root points at (the Linode goofys mount, by default) and
+never calls the Cohub CLI. Pass lakefs://<repo>/<tag> (repo, then tag --
+not lakefs://datasets/...) to download that tag's split_manifest.json and
+check it against the mounted split, so a pinned run cannot silently train
+on the wrong data version. Frame reads stay on the mounted split; Cohub is
+only the version check, not the file server. --resume of a run that stored
+a URI must pass the same flag and exits if it is missing or disagrees.
+Runs that never recorded one resume without it.
 """
 
 import hashlib
@@ -59,14 +61,17 @@ def download_manifest_sha256(repo, tag, dest_dir, cohub_bin="cohub"):
 
 
 def verify_dataset_version(dataset_version, split_root, cohub_bin="cohub"):
-    """Require --dataset_version and check it against the mounted split.
-    Returns (repo, tag) on success; exits the process otherwise."""
+    """Check --dataset_version against the mounted split when it is set.
+
+    An empty value skips the check and returns None, so training can keep
+    reading a goofys mount with no Cohub CLI. Returns (repo, tag) when the
+    mounted split_manifest.json matches the tag; exits otherwise."""
     if not dataset_version:
         print(
-            "--dataset_version is required for --dataset outplay, e.g. "
-            "lakefs://sports-outplay-saliency-vinet/v1"
+            "No --dataset_version; skipping the Cohub manifest check and "
+            "training against the mounted split."
         )
-        sys.exit(1)
+        return None
     repo, tag = parse_lakefs_uri(dataset_version)
     local_manifest = os.path.join(split_root, "split_manifest.json")
     if not os.path.isfile(local_manifest):
@@ -96,8 +101,14 @@ def check_resume_dataset_version(dataset_version, run_dir):
         payload = json.load(handle)
     stored = payload.get("dataset_version")
     if stored and stored != dataset_version:
-        print(
-            "--dataset_version %s disagrees with this run's stored %s (%s)"
-            % (dataset_version, stored, config_path)
-        )
+        if not dataset_version:
+            print(
+                "This run is pinned to %s (%s). Pass the same --dataset_version to resume."
+                % (stored, config_path)
+            )
+        else:
+            print(
+                "--dataset_version %s disagrees with this run's stored %s (%s)"
+                % (dataset_version, stored, config_path)
+            )
         sys.exit(1)

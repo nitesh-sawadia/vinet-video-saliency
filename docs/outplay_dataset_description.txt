@@ -1,0 +1,15 @@
+Sports outplay saliency clips staged for Cohub/LakeFS import.
+
+Layout under the tag's S3 prefix:
+  split_manifest.json
+  train/<sport>/<game>/<window>/images/0001.png .. 0032.png
+  train/<sport>/<game>/<window>/maps/0001.png .. 0032.png
+  val/<sport>/<game>/<window>/images/0001.png .. 0032.png
+  val/<sport>/<game>/<window>/maps/0001.png .. 0032.png
+
+Each window is one 32-frame clip. images/0001.png-0032.png are the RGB
+frames; maps/0001.png-0032.png are the matching saliency maps. The loss
+during training only reads maps/0032.png as the ground-truth target for
+that clip; the other 31 maps are logged for visualization only. See
+ViNet_S/outplay_dataset.py (OutplayWindowDataset) for the loader that
+consumes this layout.

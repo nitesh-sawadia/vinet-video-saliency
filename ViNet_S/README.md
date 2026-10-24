@@ -6,7 +6,7 @@ Finetune ViNet-S on the sports outplay split. The local checkout is the source o
 - Repo on the VM: `/home/nitesh_sawadia/vinet_s/vinet-video-saliency`
 - Virtualenv: `/home/nitesh_sawadia/vinet_s/venv`
 - Checkpoint: `/home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt`
-- Dataset mount: `/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split`
+- Dataset mount: `/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split` (goofys over Linode). Cohub is optional; see [`docs/cohub.md`](../docs/cohub.md).
 - MLflow: `http://104.105.26.182:5000`, experiment `sports-saliency-ViNet-S`
 - TensorBoard logdir: `/home/nitesh_sawadia/vinet_s/tensorboard`
 
@@ -69,6 +69,8 @@ test -f "$DATA_ROOT/split_manifest.json"
 ls -lh "$DATA_ROOT/split_manifest.json"
 ```
 
+That path is the default `--split_root`. Training does not call Cohub unless you pass `--dataset_version`. To pin a run, mount the staged AWS prefix, pass it as `--split_root`, and pass `--dataset_version lakefs://sports-outplay-saliency-vinet/v1`. `train.py` then downloads that tag's `split_manifest.json` with `cohub` and exits if it does not match the mount. See [`docs/cohub.md`](../docs/cohub.md).
+
 ## 4. Check the checkpoint and GPU
 
 ```bash
@@ -126,7 +128,7 @@ Watch the GPU from another shell:
 watch -n 2 nvidia-smi
 ```
 
-Startup can take a while because the loader checks the mounted split.
+Startup can take a while because the loader checks the mounted split. The Cohub manifest download runs only when `--dataset_version` is set.
 
 ## 7. Open TensorBoard
 
@@ -157,7 +159,7 @@ ls -lt /home/nitesh_sawadia/vinet_s/runs
 ls -lt /home/nitesh_sawadia/vinet_s/tensorboard
 ```
 
-A run directory contains `config/args.json`, `checkpoints/best.pt`, `checkpoints/last.pt`, and `checkpoints/epoch_<N>.pt`. Each of those files stores the model weights, the Adam state, the completed epoch, and the best validation loss. TensorBoard events are not stored inside that directory. They are under `/home/nitesh_sawadia/vinet_s/tensorboard/<same run name>/{train,val}`.
+A run directory contains `config/args.json`, `checkpoints/best.pt`, `checkpoints/last.pt`, and `checkpoints/epoch_<N>.pt`. Each of those files stores the model weights, the Adam state, the completed epoch, the best validation loss, and that epoch's validation CC and SIM. When `--dataset_version` was set, `config/args.json` records it. TensorBoard events are not stored inside that directory. They are under `/home/nitesh_sawadia/vinet_s/tensorboard/<same run name>/{train,val}`.
 
 ## 9. Resume a run
 
@@ -176,6 +178,8 @@ From a checkpoint file inside that run's `checkpoints` directory:
 ```
 
 `--checkpoint_path` is ignored when `--resume` is set. Add `--clear_tensorboard_media` to drop logged images and videos from that run's TensorBoard events and keep the scalar curves. Checkpoints are not deleted.
+
+If that run's `config/args.json` records a `dataset_version`, pass the same `--dataset_version`. `train.py` exits if the flag is missing or disagrees. Runs that never recorded one resume without it. Resuming does not register a model with Cohub -- that only happens through `make cohub-release` (see [`docs/cohub.md`](../docs/cohub.md)).
 
 Weight files written before this resume support have no Adam state. Resuming one of those continues the epoch taken from `epoch_<N>.pt` and starts Adam fresh. The next checkpoint written by this code can be resumed in full.
 

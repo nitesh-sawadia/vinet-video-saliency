@@ -103,9 +103,16 @@ class VerifyDatasetVersionTest(unittest.TestCase):
         finally:
             dv.subprocess.run = original_run
 
-    def test_missing_dataset_version_exits(self):
-        with self.assertRaises(SystemExit):
-            dv.verify_dataset_version("", self.split_root)
+    def test_empty_dataset_version_skips_cohub(self):
+        def _fail_if_called(cmd, check=False, capture_output=False, text=False):
+            raise AssertionError("cohub should not be called when --dataset_version is empty")
+
+        original_run = subprocess.run
+        dv.subprocess.run = _fail_if_called
+        try:
+            self.assertIsNone(dv.verify_dataset_version("", self.split_root))
+        finally:
+            dv.subprocess.run = original_run
 
     def test_missing_local_manifest_exits(self):
         os.remove(self.manifest_path)
@@ -151,6 +158,11 @@ class CheckResumeDatasetVersionTest(unittest.TestCase):
         self._write_args_json("lakefs://sports-outplay-saliency-vinet/v1")
         with self.assertRaises(SystemExit):
             dv.check_resume_dataset_version("lakefs://sports-outplay-saliency-vinet/v2", self.run_dir)
+
+    def test_omitted_flag_on_pinned_run_exits(self):
+        self._write_args_json("lakefs://sports-outplay-saliency-vinet/v1")
+        with self.assertRaises(SystemExit):
+            dv.check_resume_dataset_version("", self.run_dir)
 
     def test_missing_args_json_is_a_noop(self):
         # Older runs with no config/args.json at all should not block resume.

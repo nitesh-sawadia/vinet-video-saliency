@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sports-outplay-saliency-vinet input",
+  "description": "One 32-frame outplay clip: float32, ImageNet-normalized RGB, shape [32, 3, 224, 384] (frames, channels, height, width).",
+  "type": "array",
+  "minItems": 32,
+  "maxItems": 32,
+  "items": {
+    "type": "array",
+    "minItems": 3,
+    "maxItems": 3,
+    "items": {
+      "type": "array",
+      "minItems": 224,
+      "maxItems": 224,
+      "items": {
+        "type": "array",
+        "minItems": 384,
+        "maxItems": 384,
+        "items": { "type": "number" }
+      }
+    }
+  },
+  "x-dtype": "float32",
+  "x-shape": [32, 3, 224, 384],
+  "x-layout": "frames, channels (RGB), height, width",
+  "x-preprocessing": {
+    "resize": "384x224 (width x height), PIL bilinear",
+    "normalize": "torchvision.transforms.Normalize",
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sports-outplay-saliency-vinet output",
+  "description": "Predicted saliency map for the clip's last frame: float32, shape [224, 384] (height, width), values in [0, 1] (sigmoid output).",
+  "type": "array",
+  "minItems": 224,
+  "maxItems": 224,
+  "items": {
+    "type": "array",
+    "minItems": 384,
+    "maxItems": 384,
+    "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+  },
+  "x-dtype": "float32",
+  "x-shape": [224, 384],
+  "x-layout": "height, width"
+}

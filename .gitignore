@@ -1,3 +1,4 @@
+.venv/
 wandb/
 annotations/
 saved_models/
@@ -6,3 +7,6 @@ __pycache__/
 *.pt
 *.pth
 *.tar
+checkpoints.tar.gz
+.env
+.cohub_release/

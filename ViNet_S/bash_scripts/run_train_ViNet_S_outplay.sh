@@ -7,18 +7,18 @@ set -euo pipefail
 #   --clear_tensorboard_media
 # --checkpoint_path is ignored when --resume is set.
 #
-# --dataset_version pins this run to a Cohub-versioned dataset tag. At
-# startup train.py downloads that tag's split_manifest.json with `cohub`
-# and checks it against --split_root; it exits if they disagree or if
-# `cohub` is not on PATH (see docs/cohub.md). --resume must pass the same
-# --dataset_version the run started with.
+# Cohub is optional. This script trains the Linode goofys mount and does
+# not call cohub. To pin a run, point --split_root at the staged prefix
+# and pass --dataset_version (see docs/cohub.md):
+#   --split_root /home/nitesh_sawadia/mnt/aiml-sports-data/sports-outplay-saliency-vinet/v1 \
+#   --dataset_version lakefs://sports-outplay-saliency-vinet/v1 \
+# A resumed run that stored a dataset_version must pass that same flag.
 
 cd "$(dirname "$0")/.."
 
 CUDA_VISIBLE_DEVICES=0 /home/nitesh_sawadia/vinet_s/venv/bin/python train.py \
   --dataset outplay \
-  --split_root /home/nitesh_sawadia/mnt/aiml-sports-data/sports-outplay-saliency-vinet/v1 \
-  --dataset_version lakefs://sports-outplay-saliency-vinet/v1 \
+  --split_root /home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split \
   --checkpoint_path /home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt \
   --clip_size 32 \
   --batch_size 32 \

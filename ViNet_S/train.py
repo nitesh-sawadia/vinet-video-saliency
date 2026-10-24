@@ -23,7 +23,7 @@ from utils import *
 
 OUTPLAY_MLFLOW_URI = "http://104.105.26.182:5000"
 OUTPLAY_MLFLOW_EXPERIMENT = "sports-saliency-ViNet-S"
-OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/aiml-sports-data/sports-outplay-saliency-vinet/v1"
+OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split"
 OUTPLAY_RUNS_ROOT = "/home/nitesh_sawadia/vinet_s/runs"
 OUTPLAY_TB_ROOT = "/home/nitesh_sawadia/vinet_s/tensorboard"
 OUTPLAY_VAL_IMAGE_INDEXES = (0, 65, 130, 195, 260, 325, 390, 455)
@@ -106,7 +106,7 @@ parser.add_argument('--fold_lists_path',default='',type=str)
 
 parser.add_argument('--split_root', default=OUTPLAY_SPLIT_ROOT, type=str)
 parser.add_argument('--dataset_version', default='', type=str,
-                     help="lakefs://<repo>/<tag> dataset tag this run trains on; required for --dataset outplay")
+                     help="optional lakefs://<repo>/<tag> pin; omitted, training reads --split_root with no Cohub check")
 parser.add_argument('--save_every', default=1, type=int)
 parser.add_argument('--resume', default='', type=str)
 parser.add_argument('--clear_tensorboard_media', action='store_true')
@@ -126,8 +126,8 @@ if args.dataset == "outplay":
     args.efficientnet = False
     args.num_hier = 3
     args.clip_size = 32
-    # Pin training to a Cohub-versioned dataset tag. Frame reads stay on
-    # the mounted split; this only checks that the mount matches the tag.
+    # Optional Cohub pin. Frame reads stay on --split_root either way.
+    # The manifest check runs only when --dataset_version is set.
     verify_dataset_version(args.dataset_version, args.split_root)
 
 print(args)

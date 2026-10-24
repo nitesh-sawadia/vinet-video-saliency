@@ -1,0 +1,8 @@
+Resize each RGB frame to 384x224 (width x height) with PIL bilinear, convert
+to a float32 tensor in [0,1] (torchvision ToTensor), then normalize with
+ImageNet mean 0.485, 0.456, 0.406 and std 0.229, 0.224, 0.225 (torchvision
+Normalize). A clip is 32 frames named images/0001.png through images/0032.png
+and is passed to the model as (channels, time, height, width) after a
+permute. The ground-truth map is maps/0032.png, resized the same way and
+scaled to [0,1] by dividing by 255 when needed. See ViNet_S/outplay_dataset.py
+(OutplayWindowDataset) for the exact loader.
