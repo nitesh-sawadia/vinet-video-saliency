@@ -300,7 +300,9 @@
           "</strong></span></div></div>" +
           "<div class='metrics'><strong>" + (s.title || s.primary_hypothesis) +
           "</strong></div></div>" +
-          "<div class='legend'><span>32-frame clip @ 8fps</span><span>Left: frame</span><span>Middle: GT overlay</span><span>Right: prediction</span></div>" +
+          "<div class='legend'><span>32-frame clip @ 8fps</span><span>Left: frame + Sol boxes</span><span>Middle: GT overlay</span><span>Right: prediction</span>" +
+          (s.sol_boxes === false ? "<span style='color:var(--warn)'>no Sol boxes</span>" : "") +
+          "</div>" +
           mediaFor(s) +
           "<div class='tags'>" + regenTag + confirmed + "</div>" +
           (rationale ? "<div class='rationale'>" + escapeHtml(rationale) + "</div>" : "") +

@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--out", required=True, help="Directory produced by score")
     render.add_argument("--checkpoint", required=True)
     render.add_argument("--split-root", default=None, help="Defaults to summary.json split_root")
+    render.add_argument(
+        "--pre-split-root",
+        default=None,
+        help="Linode pre_split root for Sol boxes fallback (default: sibling of split-root)",
+    )
     render.add_argument("--batch-size", type=int, default=8)
     render.add_argument("--num-workers", type=int, default=2)
     render.add_argument("--device", default=None)
@@ -159,6 +164,7 @@ def main(argv=None) -> int:
             out_dir=args.out,
             checkpoint_path=args.checkpoint,
             split_root=args.split_root,
+            pre_split_root=args.pre_split_root,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             device_name=args.device,
