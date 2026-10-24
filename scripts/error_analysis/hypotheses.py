@@ -47,6 +47,16 @@ HYPOTHESES = [
         ),
     },
     {
+        "id": "temporal_inconsistency",
+        "title": "Temporal inconsistency",
+        "description": (
+            "Ground-truth attention moves across the 32-frame clip (player/ball "
+            "tracking, cut, or evolving play) while the model emits one static "
+            "map for the whole window, so early/mid frames disagree with the "
+            "prediction even if the last frame is closer."
+        ),
+    },
+    {
         "id": "graphics_overlay",
         "title": "Broadcast graphics",
         "description": "Scorebug, replay bug, or on-screen text distracts the model.",
@@ -92,6 +102,9 @@ def propose_from_features(features: dict) -> list[dict]:
     frame_std = float(features.get("frame_luma_std", 0.0))
     frame_mean = float(features.get("frame_luma_mean", 0.0))
     motion = float(features.get("clip_motion_mean", 0.0))
+    gt_peak_disp = float(features.get("gt_peak_displacement_norm", 0.0))
+    gt_peak_path = float(features.get("gt_peak_path_norm", 0.0))
+    gt_temp_corr = float(features.get("gt_temporal_corr_mean", 1.0))
 
     if center_delta > 0.18 and pred_r < 0.28 and gt_r > 0.35:
         proposals.append(
@@ -159,6 +172,25 @@ def propose_from_features(features: dict) -> list[dict]:
                 "id": "camera_or_motion",
                 "confidence": min(0.85, 0.35 + motion * 4.0),
                 "evidence": "clip_motion_mean=%.3f" % motion,
+            }
+        )
+
+    # Model predicts one map for the window; large GT peak travel => temporal miss.
+    if gt_peak_disp > 0.12 or gt_peak_path > 0.35 or gt_temp_corr < 0.55:
+        proposals.append(
+            {
+                "id": "temporal_inconsistency",
+                "confidence": min(
+                    0.95,
+                    0.4
+                    + 0.8 * gt_peak_disp
+                    + 0.25 * max(0.0, gt_peak_path - 0.2)
+                    + 0.35 * max(0.0, 0.7 - gt_temp_corr),
+                ),
+                "evidence": (
+                    "gt_peak_disp=%.2f gt_peak_path=%.2f gt_temporal_corr=%.2f"
+                    % (gt_peak_disp, gt_peak_path, gt_temp_corr)
+                ),
             }
         )
 

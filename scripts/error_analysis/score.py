@@ -336,6 +336,7 @@ def score_validation(
                     np.transpose(denormalize_frame_chw(last_frame), (1, 2, 0)) * 255.0
                 ).astype(np.uint8),
                 clip_frames=clip_rgbs,
+                gt_maps_thw=maps_np,
             )
         )
         row["features"] = feats

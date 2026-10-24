@@ -133,11 +133,53 @@ def clip_motion_mean(frames_rgb: list[np.ndarray]) -> float:
     return float(np.mean(diffs)) if diffs else 0.0
 
 
+def compute_temporal_features(gt_maps_thw: np.ndarray) -> dict:
+    """Temporal stats over the 32 GT maps (model pred is a single static map)."""
+    maps = np.asarray(gt_maps_thw, dtype=np.float64)
+    if maps.ndim != 3 or maps.shape[0] < 2:
+        return {
+            "gt_peak_displacement_norm": 0.0,
+            "gt_peak_path_norm": 0.0,
+            "gt_temporal_corr_mean": 1.0,
+        }
+    t_count, height, width = maps.shape
+    peaks = [_peak_yx(maps[t]) for t in range(t_count)]
+    path = 0.0
+    for i in range(1, t_count):
+        y0, x0 = peaks[i - 1]
+        y1, x1 = peaks[i]
+        path += float(
+            np.hypot((y1 - y0) / max(height - 1, 1), (x1 - x0) / max(width - 1, 1))
+        )
+    y0, x0 = peaks[0]
+    y1, x1 = peaks[-1]
+    displacement = float(
+        np.hypot((y1 - y0) / max(height - 1, 1), (x1 - x0) / max(width - 1, 1))
+    )
+
+    corrs = []
+    for i in range(1, t_count):
+        a = maps[i - 1].reshape(-1)
+        b = maps[i].reshape(-1)
+        a = a - a.mean()
+        b = b - b.mean()
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom < 1e-8:
+            continue
+        corrs.append(float(np.dot(a, b) / denom))
+    return {
+        "gt_peak_displacement_norm": displacement,
+        "gt_peak_path_norm": path,
+        "gt_temporal_corr_mean": float(np.mean(corrs)) if corrs else 1.0,
+    }
+
+
 def compute_map_features(
     pred: np.ndarray,
     gt: np.ndarray,
     frame_rgb: np.ndarray | None = None,
     clip_frames: list[np.ndarray] | None = None,
+    gt_maps_thw: np.ndarray | None = None,
 ) -> dict:
     pred = np.asarray(pred, dtype=np.float64)
     gt = np.asarray(gt, dtype=np.float64)
@@ -170,6 +212,9 @@ def compute_map_features(
         "frame_luma_mean": 0.0,
         "frame_luma_std": 0.0,
         "clip_motion_mean": 0.0,
+        "gt_peak_displacement_norm": 0.0,
+        "gt_peak_path_norm": 0.0,
+        "gt_temporal_corr_mean": 1.0,
     }
     if frame_rgb is not None:
         mean, std = frame_luma_stats(frame_rgb)
@@ -177,4 +222,6 @@ def compute_map_features(
         features["frame_luma_std"] = std
     if clip_frames:
         features["clip_motion_mean"] = clip_motion_mean(clip_frames)
+    if gt_maps_thw is not None:
+        features.update(compute_temporal_features(gt_maps_thw))
     return features

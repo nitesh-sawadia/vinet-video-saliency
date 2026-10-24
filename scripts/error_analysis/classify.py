@@ -44,7 +44,15 @@ def classify_hard_examples(
     for i, sample in enumerate(hard):
         proposals = propose_from_features(sample.get("features") or {})
         panel_rel = sample.get("panel")
+        clip_rel = sample.get("clip")
         panel_abs = os.path.join(out_dir, panel_rel) if panel_rel else None
+        clip_abs = os.path.join(out_dir, clip_rel) if clip_rel else None
+        # Also accept default clip path if scores.jsonl predates the clip field.
+        if (not clip_abs or not os.path.isfile(clip_abs)) and sample.get("id"):
+            candidate = os.path.join(out_dir, "clips", "%s.webp" % sample["id"])
+            if os.path.isfile(candidate):
+                clip_abs = candidate
+                sample["clip"] = os.path.relpath(candidate, out_dir).replace("\\", "/")
         vlm_result = None
         confirmed = []
 
@@ -58,12 +66,13 @@ def classify_hard_examples(
                 for p in proposals
                 if float(p["confidence"]) >= 0.55
             ][:2]
-        elif panel_abs and os.path.isfile(panel_abs):
+        elif (clip_abs and os.path.isfile(clip_abs)) or (panel_abs and os.path.isfile(panel_abs)):
             try:
                 vlm_result = confirm_hypotheses(
-                    panel_abs,
                     sample,
                     proposals,
+                    clip_path=clip_abs if clip_abs and os.path.isfile(clip_abs) else None,
+                    panel_path=panel_abs if panel_abs and os.path.isfile(panel_abs) else None,
                     model=vlm_model,
                 )
                 confirmed = vlm_result["confirmed"]
@@ -82,7 +91,7 @@ def classify_hard_examples(
                 {
                     "id": p["id"],
                     "confidence": float(p["confidence"]) * 0.7,
-                    "rationale": "no panel; geometric fallback: %s" % p.get("evidence", ""),
+                    "rationale": "no clip/panel; geometric fallback: %s" % p.get("evidence", ""),
                 }
                 for p in proposals[:1]
             ]

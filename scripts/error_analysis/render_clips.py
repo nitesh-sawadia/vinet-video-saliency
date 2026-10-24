@@ -39,8 +39,9 @@ def render_hard_clips(
     fps: int = 8,
 ) -> dict:
     """Re-infer hard examples and write clips/<id>.mp4 (full 32-frame panels)."""
+    from features import compute_map_features, compute_temporal_features
     from score import load_model, _squeeze_pred, _resize_pred_to_gt, _release_cuda_after_inference, _ensure_vinet_path
-    from viz import save_clip_video
+    from viz import denormalize_frame_chw, save_clip_video, save_panel
 
     _ensure_vinet_path()
     from outplay_dataset import OutplayWindowDataset
@@ -109,6 +110,29 @@ def render_hard_clips(
                     fps=fps,
                 )
                 row["clip"] = os.path.relpath(clip_abs, out_dir).replace("\\", "/")
+                # Refresh temporal features now that we have all 32 GT maps.
+                last_rgb = (
+                    np.transpose(
+                        denormalize_frame_chw(clips_cpu[b, -1]), (1, 2, 0)
+                    )
+                    * 255.0
+                ).astype(np.uint8)
+                feats = dict(row.get("features") or {})
+                feats.update(
+                    compute_map_features(
+                        preds_cpu[b],
+                        maps_cpu[b, -1],
+                        frame_rgb=last_rgb,
+                        gt_maps_thw=maps_cpu[b],
+                    )
+                )
+                feats.update(compute_temporal_features(maps_cpu[b]))
+                row["features"] = feats
+                panel_rel = row.get("panel") or os.path.join("panels", "%s.png" % row["id"])
+                panel_abs = os.path.join(out_dir, panel_rel)
+                if not os.path.isfile(panel_abs):
+                    save_panel(panel_abs, clips_cpu[b, -1], maps_cpu[b, -1], preds_cpu[b])
+                    row["panel"] = panel_rel.replace("\\", "/")
                 done += 1
             print(
                 "clips %d/%d  elapsed=%.1fs" % (done, len(hard), time.time() - tic),
