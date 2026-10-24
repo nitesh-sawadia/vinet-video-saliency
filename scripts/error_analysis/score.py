@@ -7,6 +7,7 @@ pass. Hard-example panels reuse cached last-frame / pred maps (no re-infer).
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -127,6 +128,36 @@ def _cc_per_sample(s_map: torch.Tensor, gt: torch.Tensor, eps: float = 1e-8) -> 
     aa = (s_flat * s_flat).sum(dim=1)
     bb = (g_flat * g_flat).sum(dim=1)
     return ab / torch.sqrt(aa * bb).clamp_min(eps)
+
+
+def _release_cuda_after_inference(model, loader=None) -> None:
+    """Drop the model / dataloader and return VRAM to the driver."""
+    try:
+        if model is not None:
+            model.cpu()
+    except Exception:
+        pass
+    del model
+    if loader is not None:
+        # Break persistent worker processes before dropping the loader.
+        try:
+            loader._iterator = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        del loader
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        try:
+            free_b, total_b = torch.cuda.mem_get_info()
+            print(
+                "Released CUDA after inference (free=%.1f / total=%.1f GiB)"
+                % (free_b / (1024 ** 3), total_b / (1024 ** 3)),
+                flush=True,
+            )
+        except Exception:
+            print("Released CUDA cache after inference", flush=True)
 
 
 def _sim_per_sample(s_map: torch.Tensor, gt: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -253,6 +284,11 @@ def score_validation(
                     % (index, len(dataset), batch_i + 1, time.time() - tic),
                     flush=True,
                 )
+
+    # Panels use CPU caches only — free the GPU before VLM classify / review.
+    _release_cuda_after_inference(model, loader)
+    model = None
+    loader = None
 
     ranked = sorted(rows, key=lambda r: r["loss"], reverse=True)
     n_hard = int(round(len(rows) * hard_fraction))
