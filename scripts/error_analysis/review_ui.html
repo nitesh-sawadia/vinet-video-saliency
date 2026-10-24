@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Outplay saliency error review</title>
+  <style>
+    :root {
+      --bg: #12141a;
+      --panel: #1b1e27;
+      --panel-2: #232734;
+      --text: #e8eaf0;
+      --muted: #9aa3b5;
+      --line: #2e3444;
+      --accent: #6ea8ff;
+      --accent-2: #8bd5b5;
+      --warn: #e2b86a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: end;
+      justify-content: space-between;
+      padding: 20px 24px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    header p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: calc(100vh - 74px);
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      padding: 16px;
+      overflow: auto;
+      background: var(--panel);
+    }
+    main {
+      padding: 16px 20px 40px;
+      overflow: auto;
+    }
+    .bucket {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: var(--text);
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin: 0 0 6px;
+      cursor: pointer;
+    }
+    .bucket:hover { background: var(--panel-2); }
+    .bucket.active {
+      border-color: var(--accent);
+      background: var(--panel-2);
+    }
+    .bucket .name { display: block; font-weight: 600; }
+    .bucket .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .filters {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .filters input, .filters select {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 10px;
+    }
+    .card h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .metrics {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+    }
+    .metrics span strong { color: var(--text); font-weight: 600; }
+    .panel-img {
+      width: 100%;
+      max-width: 1100px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #000;
+      display: block;
+    }
+    .legend {
+      display: flex;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 12px;
+      margin: 8px 0 12px;
+    }
+    .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .tag {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      color: var(--accent-2);
+      background: rgba(139, 213, 181, 0.08);
+    }
+    .tag.secondary { color: var(--warn); background: rgba(226, 184, 106, 0.08); }
+    .rationale {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border-radius: 8px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 40px 10px;
+      text-align: center;
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Outplay saliency hard-example review</h1>
+      <p id="subtitle">Loading review_index.json…</p>
+    </div>
+    <div class="metrics" id="summary"></div>
+  </header>
+  <div class="layout">
+    <aside id="buckets"></aside>
+    <main>
+      <div class="filters">
+        <input id="search" type="search" placeholder="Filter by id / game / sport" />
+        <select id="sport">
+          <option value="">All sports</option>
+        </select>
+        <select id="sort">
+          <option value="loss">Sort by loss (worst first)</option>
+          <option value="cc">Sort by CC (worst first)</option>
+          <option value="id">Sort by id</option>
+        </select>
+      </div>
+      <div id="cards"></div>
+    </main>
+  </div>
+  <script>
+    let DATA = null;
+    let activeBucket = "all";
+
+    async function boot() {
+      const res = await fetch("review_index.json");
+      DATA = await res.json();
+      const n = DATA.samples.length;
+      const buckets = Object.keys(DATA.bucket_counts || {}).length;
+      document.getElementById("subtitle").textContent =
+        n + " hard examples · " + buckets + " confirmed hypothesis buckets";
+      document.getElementById("summary").innerHTML =
+        Object.entries(DATA.bucket_counts || {})
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([k, v]) => "<span>" + k + " <strong>" + v + "</strong></span>")
+          .join("");
+      const sports = [...new Set(DATA.samples.map(s => s.sport).filter(Boolean))].sort();
+      const sportSel = document.getElementById("sport");
+      sports.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s; opt.textContent = s;
+        sportSel.appendChild(opt);
+      });
+      renderBuckets();
+      renderCards();
+      document.getElementById("search").addEventListener("input", renderCards);
+      document.getElementById("sport").addEventListener("change", renderCards);
+      document.getElementById("sort").addEventListener("change", renderCards);
+    }
+
+    function renderBuckets() {
+      const counts = { all: DATA.samples.length, ...(DATA.bucket_counts || {}) };
+      const order = ["all", ...DATA.hypotheses.map(h => h.id).filter(id => counts[id])];
+      const titles = Object.fromEntries(DATA.hypotheses.map(h => [h.id, h.title]));
+      titles.all = "All hard examples";
+      const root = document.getElementById("buckets");
+      root.innerHTML = "";
+      order.forEach(id => {
+        const btn = document.createElement("button");
+        btn.className = "bucket" + (id === activeBucket ? " active" : "");
+        btn.innerHTML = "<span class='name'>" + (titles[id] || id) + "</span>" +
+          "<span class='meta'>" + (counts[id] || 0) + " samples · " + id + "</span>";
+        btn.onclick = () => { activeBucket = id; renderBuckets(); renderCards(); };
+        root.appendChild(btn);
+      });
+    }
+
+    function filtered() {
+      const q = document.getElementById("search").value.trim().toLowerCase();
+      const sport = document.getElementById("sport").value;
+      const sort = document.getElementById("sort").value;
+      let rows = DATA.samples.slice();
+      if (activeBucket !== "all") {
+        rows = rows.filter(s => s.primary_hypothesis === activeBucket ||
+          (s.secondary_hypotheses || []).includes(activeBucket));
+      }
+      if (sport) rows = rows.filter(s => s.sport === sport);
+      if (q) {
+        rows = rows.filter(s =>
+          [s.id, s.game, s.sport, s.window, s.primary_hypothesis]
+            .join(" ").toLowerCase().includes(q)
+        );
+      }
+      rows.sort((a, b) => {
+        if (sort === "cc") return a.cc - b.cc;
+        if (sort === "id") return a.id.localeCompare(b.id);
+        return b.loss - a.loss;
+      });
+      return rows;
+    }
+
+    function renderCards() {
+      const rows = filtered();
+      const root = document.getElementById("cards");
+      if (!rows.length) {
+        root.innerHTML = "<div class='empty'>No samples in this filter.</div>";
+        return;
+      }
+      root.innerHTML = rows.map(s => {
+        const confirmed = (s.confirmed || []).map((c, i) =>
+          "<span class='tag" + (i ? " secondary" : "") + "'>" +
+          c.id + " · " + (c.confidence || 0).toFixed(2) + "</span>"
+        ).join("");
+        const rationale = ((s.confirmed || [])[0] || {}).rationale || s.vlm_notes || "";
+        return "<article class='card'>" +
+          "<div class='card-head'><div><h2>" + s.id + "</h2>" +
+          "<div class='metrics'><span>" + (s.sport || "") + " / " + (s.game || "") +
+          "</span><span>loss <strong>" + s.loss.toFixed(3) +
+          "</strong></span><span>CC <strong>" + s.cc.toFixed(3) +
+          "</strong></span><span>KL <strong>" + s.kldiv.toFixed(3) +
+          "</strong></span></div></div>" +
+          "<div class='metrics'><strong>" + (s.title || s.primary_hypothesis) +
+          "</strong></div></div>" +
+          "<div class='legend'><span>Left: frame</span><span>Middle: GT overlay</span><span>Right: prediction</span></div>" +
+          (s.panel ? "<img class='panel-img' loading='lazy' src='" + s.panel + "' alt='panel' />" : "") +
+          "<div class='tags'>" + confirmed + "</div>" +
+          (rationale ? "<div class='rationale'>" + escapeHtml(rationale) + "</div>" : "") +
+          "</article>";
+      }).join("");
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    boot().catch(err => {
+      document.getElementById("subtitle").textContent = "Failed to load review_index.json: " + err;
+    });
+  </script>
+</body>
+</html>

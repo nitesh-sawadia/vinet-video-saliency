@@ -1,0 +1,30 @@
+---
+description: Sync code to the training VM only via the git `vm` remote
+alwaysApply: true
+---
+
+# VM code sync: git only
+
+The local checkout is the source of truth. The training VM is already a git remote named `vm`.
+
+**Do not** use `rsync`, `scp`, `sftp` put, or similar to copy tracked (or about-to-be-tracked) source code between this machine and the VM.
+
+**Do** sync code with git:
+
+```bash
+# local: commit, then
+git push vm master
+
+# on the VM checkout:
+cd /home/nitesh_sawadia/vinet_s/vinet-video-saliency
+git status
+git rev-parse HEAD   # must match local HEAD
+```
+
+Do not edit tracked files on the VM. Pull/reset only as needed so the VM matches the pushed commit.
+
+Exceptions (not source sync):
+
+- Reading logs, checkpoints, TensorBoard, or analysis **outputs** on the VM over SSH is fine.
+- Copying **generated artifacts** (e.g. error-analysis panels) off the VM is fine when those paths are not the repo’s source tree.
+- Never copy `.env` or secrets into git; keep credentials out of commits. If the VM needs env vars, set them on the VM or use a local-only file that is gitignored — do not treat secret files as “code sync via rsync.”

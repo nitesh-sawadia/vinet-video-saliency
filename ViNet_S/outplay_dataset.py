@@ -88,7 +88,7 @@ class OutplayWindowDataset(Dataset):
     loss reads. all_maps is maps/0001.png-0032.png for TensorBoard.
     """
 
-    def __init__(self, split_root, split, clip_size=FRAME_COUNT):
+    def __init__(self, split_root, split, clip_size=FRAME_COUNT, validate=True):
         if clip_size != FRAME_COUNT:
             raise ValueError(
                 "Outplay windows are %d frames, got clip_size=%s" % (FRAME_COUNT, clip_size)
@@ -111,11 +111,14 @@ class OutplayWindowDataset(Dataset):
             if not isinstance(window, dict) or window.get("split") != split:
                 continue
             path = window_path(split_root, window)
-            _require_window(path)
+            # validate=False skips the per-window readdir walk. Useful on
+            # goofys mounts for offline tools that already trust the split.
+            if validate:
+                _require_window(path)
             self.paths.append(path)
         if not self.paths:
             raise RuntimeError("Outplay split '%s' has no windows in %s" % (split, manifest_path))
-        print("outplay", split, len(self.paths))
+        print("outplay", split, len(self.paths), "validate=%s" % validate)
 
     def __len__(self):
         return len(self.paths)

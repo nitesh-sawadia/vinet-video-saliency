@@ -10,3 +10,5 @@ __pycache__/
 checkpoints.tar.gz
 .env
 .cohub_release/
+error_analysis_out/
+*.pyc
