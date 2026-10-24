@@ -18,11 +18,12 @@ from ViNet_S_dataloader import *
 from loss import *
 from ViNet_S_model import *
 from outplay_dataset import OutplayWindowDataset
+from dataset_version import verify_dataset_version, check_resume_dataset_version
 from utils import *
 
 OUTPLAY_MLFLOW_URI = "http://104.105.26.182:5000"
 OUTPLAY_MLFLOW_EXPERIMENT = "sports-saliency-ViNet-S"
-OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/ml-fanpulse/sports_saliency/vinet_outplay/split"
+OUTPLAY_SPLIT_ROOT = "/home/nitesh_sawadia/mnt/aiml-sports-data/sports-outplay-saliency-vinet/v1"
 OUTPLAY_RUNS_ROOT = "/home/nitesh_sawadia/vinet_s/runs"
 OUTPLAY_TB_ROOT = "/home/nitesh_sawadia/vinet_s/tensorboard"
 OUTPLAY_VAL_IMAGE_INDEXES = (0, 65, 130, 195, 260, 325, 390, 455)
@@ -41,6 +42,14 @@ parser.add_argument('--nss_emlnet',default=False, type=bool)
 parser.add_argument('--nss_norm',default=False, type=bool)
 parser.add_argument('--l1',default=False, type=bool)
 parser.add_argument('--lr_sched',default=False, type=bool)
+parser.add_argument('--lr_factor',default=0.5, type=float,
+                     help="ReduceLROnPlateau multiplicative factor when val loss plateaus")
+parser.add_argument('--lr_patience',default=3, type=int,
+                     help="ReduceLROnPlateau epochs with no val-loss improvement before LR drop")
+parser.add_argument('--lr_threshold',default=1e-3, type=float,
+                     help="ReduceLROnPlateau minimum relative improvement to count as progress")
+parser.add_argument('--lr_min',default=1e-7, type=float,
+                     help="ReduceLROnPlateau lower bound on learning rate")
 parser.add_argument('--optim',default="Adam", type=str)
 
 parser.add_argument('--kldiv_coeff',default=1.0, type=float)
@@ -96,6 +105,8 @@ parser.add_argument('--model_save_path', default='', type=str)
 parser.add_argument('--fold_lists_path',default='',type=str)
 
 parser.add_argument('--split_root', default=OUTPLAY_SPLIT_ROOT, type=str)
+parser.add_argument('--dataset_version', default='', type=str,
+                     help="lakefs://<repo>/<tag> dataset tag this run trains on; required for --dataset outplay")
 parser.add_argument('--save_every', default=1, type=int)
 parser.add_argument('--resume', default='', type=str)
 parser.add_argument('--clear_tensorboard_media', action='store_true')
@@ -115,6 +126,9 @@ if args.dataset == "outplay":
     args.efficientnet = False
     args.num_hier = 3
     args.clip_size = 32
+    # Pin training to a Cohub-versioned dataset tag. Frame reads stay on
+    # the mounted split; this only checks that the mount matches the tag.
+    verify_dataset_version(args.dataset_version, args.split_root)
 
 print(args)
 
@@ -348,20 +362,25 @@ def _read_training_checkpoint(path):
         if best_loss is None:
             best_loss = float("inf")
         optimizer_state = loaded.get("optimizer")
+        scheduler_state = loaded.get("scheduler")
         return {
             "model": _strip_module_prefix(loaded["model"]),
             "optimizer": optimizer_state,
+            "scheduler": scheduler_state,
             "completed_epoch": int(loaded["epoch"]),
             "best_loss": float(best_loss),
             "has_optimizer": optimizer_state is not None,
+            "has_scheduler": scheduler_state is not None,
         }
     completed = _legacy_completed_epoch(path)
     return {
         "model": _strip_module_prefix(_coerce_state_dict(loaded)),
         "optimizer": None,
+        "scheduler": None,
         "completed_epoch": completed,
         "best_loss": float("inf"),
         "has_optimizer": False,
+        "has_scheduler": False,
     }
 
 
@@ -428,6 +447,8 @@ if args.resume:
         print("--resume is only implemented for dataset=outplay")
         sys.exit(1)
     run_dir, ckpt_path = _resolve_resume(args.resume)
+    if args.dataset == "outplay":
+        check_resume_dataset_version(args.dataset_version, run_dir)
     resume_state = _read_training_checkpoint(ckpt_path)
     resume_state["run_dir"] = run_dir
     resume_state["checkpoint_path"] = ckpt_path
@@ -488,6 +509,30 @@ if resume_state is not None and resume_state["has_optimizer"]:
     print("Restored optimizer state, lr", optimizer.param_groups[0]["lr"])
 elif resume_state is not None:
     print("Checkpoint has no optimizer state; Adam starts fresh")
+
+scheduler = None
+if args.lr_sched:
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=args.lr_factor,
+        patience=args.lr_patience,
+        threshold=args.lr_threshold,
+        min_lr=args.lr_min,
+    )
+    if resume_state is not None and resume_state["has_scheduler"]:
+        scheduler.load_state_dict(resume_state["scheduler"])
+        print(
+            "Restored ReduceLROnPlateau state, lr",
+            optimizer.param_groups[0]["lr"],
+        )
+    elif resume_state is not None:
+        print("Checkpoint has no scheduler state; ReduceLROnPlateau starts fresh")
+    else:
+        print(
+            "ReduceLROnPlateau enabled: factor=%s patience=%s threshold=%s min_lr=%s"
+            % (args.lr_factor, args.lr_patience, args.lr_threshold, args.lr_min)
+        )
 
 print(device)
 
@@ -612,17 +657,39 @@ def _log_pretrained_validation(writer, dataset, device, pin_memory, checkpoint_p
     print("Logged pretrained validation videos from", checkpoint_path)
 
 
-def _save_training_state(path, model, optimizer, epoch, best_loss, run_name):
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "epoch": int(epoch),
-            "best_loss": float(best_loss),
-            "run_name": run_name,
-        },
-        path,
-    )
+def _save_training_state(
+    path,
+    model,
+    optimizer,
+    epoch,
+    best_loss,
+    run_name,
+    val_cc=None,
+    val_sim=None,
+    scheduler=None,
+):
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": int(epoch),
+        "best_loss": float(best_loss),
+        "val_cc": None if val_cc is None else float(val_cc),
+        "val_sim": None if val_sim is None else float(val_sim),
+        "run_name": run_name,
+    }
+    if scheduler is not None:
+        payload["scheduler"] = scheduler.state_dict()
+    torch.save(payload, path)
+
+
+def _step_lr_scheduler(scheduler, metric):
+    if scheduler is None:
+        return
+    prev_lr = scheduler.optimizer.param_groups[0]["lr"]
+    scheduler.step(metric)
+    new_lr = scheduler.optimizer.param_groups[0]["lr"]
+    if new_lr != prev_lr:
+        print("LR {:.3e} -> {:.3e} (ReduceLROnPlateau)".format(prev_lr, new_lr))
 
 
 def _drop_media(event):
@@ -808,7 +875,7 @@ def validate(model, loader, epoch, device, args, tb_writer=None, image_indexes=(
 
     return data_to_log
 
-def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resume_state):
+def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resume_state, scheduler=None):
     if args.save_every < 1:
         print("save_every must be >= 1")
         sys.exit(1)
@@ -942,23 +1009,54 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resum
                 mlflow.log_metric("val_sim", data_to_log_val["val_sim_loss"], step=epoch)
 
                 val_loss = data_to_log_val["val_loss"]
+                val_cc = data_to_log_val["val_cc_loss"]
+                val_sim = data_to_log_val["val_sim_loss"]
                 if val_loss < best_loss:
                     best_loss = val_loss
                     best_path = os.path.join(ckpt_dir, "best.pt")
-                    _save_training_state(best_path, model, optimizer, epoch, best_loss, run_name)
+                    _save_training_state(
+                        best_path,
+                        model,
+                        optimizer,
+                        epoch,
+                        best_loss,
+                        run_name,
+                        val_cc=val_cc,
+                        val_sim=val_sim,
+                        scheduler=scheduler,
+                    )
                     print("[{:2d}, save, {}]".format(epoch, best_path))
                 if (epoch + 1) % args.save_every == 0:
                     epoch_path = os.path.join(ckpt_dir, "epoch_%d.pt" % epoch)
-                    _save_training_state(epoch_path, model, optimizer, epoch, best_loss, run_name)
-                    _save_training_state(os.path.join(ckpt_dir, "last.pt"), model, optimizer, epoch, best_loss, run_name)
+                    _save_training_state(
+                        epoch_path,
+                        model,
+                        optimizer,
+                        epoch,
+                        best_loss,
+                        run_name,
+                        val_cc=val_cc,
+                        val_sim=val_sim,
+                        scheduler=scheduler,
+                    )
+                    _save_training_state(
+                        os.path.join(ckpt_dir, "last.pt"),
+                        model,
+                        optimizer,
+                        epoch,
+                        best_loss,
+                        run_name,
+                        val_cc=val_cc,
+                        val_sim=val_sim,
+                        scheduler=scheduler,
+                    )
                     print("[{:2d}, save, {}]".format(epoch, epoch_path))
 
                 if args.use_wandb:
                     logged = {**data_to_log_train, **data_to_log_val}
                     print(logged)
                     wandb.log(logged)
-                if args.lr_sched:
-                    scheduler.step()
+                _step_lr_scheduler(scheduler, val_loss)
         finally:
             if train_writer is not None:
                 train_writer.close()
@@ -969,7 +1067,16 @@ def _run_outplay(model, optimizer, train_loader, val_loader, device, args, resum
 summary(model, (3, args.clip_size, 224, 384), args.batch_size)
 
 if args.dataset == "outplay":
-    _run_outplay(model, optimizer, train_loader, val_loader, device, args, resume_state)
+    _run_outplay(
+        model,
+        optimizer,
+        train_loader,
+        val_loader,
+        device,
+        args,
+        resume_state,
+        scheduler=scheduler,
+    )
 else:
     best_model = None
     for epoch in range(0, args.no_epochs):
@@ -1000,8 +1107,7 @@ else:
             print(data_to_log)
             wandb.log(data_to_log)
 
-        if args.lr_sched:
-            scheduler.step()
+        _step_lr_scheduler(scheduler, data_to_log_val["val_loss"])
 
 if args.use_wandb:
     wandb.finish()
