@@ -22,9 +22,10 @@ python -m error_analysis audit-dhf1k \
   --checkpoint /path/to/vinet_s_dhf1k.pt \
   --split-root /mnt/ml-fanpulse/sports_saliency/vinet_outplay/split_stride8 \
   --out ~/analysis/dhf1k_audit_stride8 \
-  --stages score,select \
-  --top-percent 5 --min-candidates 50 --max-candidates 400
+  --stages score,select
 ```
+
+`select` keeps every eligible window. Pass `--top-percent`, `--min-candidates`, or `--max-candidates` only to narrow that list.
 
 - `score` writes `dhf1k_scores.jsonl` (KL, CC, SIM, peak distance, shape
   mismatch per window), `preds/<id>.png`, and `audit_manifest.json`

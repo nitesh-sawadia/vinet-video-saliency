@@ -155,11 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
     dhf.add_argument(
         "--top-percent",
         type=float,
-        default=5.0,
-        help="Candidate percentile cap: top N%% of eligible windows (default 5)",
+        default=100.0,
+        help="Share of eligible windows to review (default 100)",
     )
-    dhf.add_argument("--min-candidates", type=int, default=50)
-    dhf.add_argument("--max-candidates", type=int, default=400)
+    dhf.add_argument("--min-candidates", type=int, default=0)
+    dhf.add_argument(
+        "--max-candidates",
+        type=int,
+        default=None,
+        help="Optional upper bound on the review list (default: no bound)",
+    )
     dhf.add_argument("--vlm-model", default=_DEFAULT_VLM_MODEL)
     dhf.add_argument("--limit", type=int, default=None, help="Cap on candidates sent to the VLM")
     dhf.add_argument("--ids", default=None, help="Comma-separated candidate ids for adjudicate")

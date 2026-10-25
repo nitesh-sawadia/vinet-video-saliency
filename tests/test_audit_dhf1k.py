@@ -235,6 +235,10 @@ class LastFrameRankingTest(_FixtureCase):
         self.assertEqual(sel["n_eligible"], 40)
         self.assertEqual(sel["n_top_percent"], 4)
         self.assertEqual(sel["n_candidates"], 6)
+        _, all_sel = ad.rank_disagreements(rows)
+        self.assertEqual(all_sel["n_candidates"], all_sel["n_eligible"])
+        self.assertEqual(all_sel["top_percent"], 100.0)
+        self.assertIsNone(all_sel["max_candidates"])
         cands = [r for r in ranked if r["candidate"]]
         self.assertEqual(len(cands), 6)
         self.assertEqual([r["selection_reason"] for r in cands],

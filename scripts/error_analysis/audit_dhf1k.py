@@ -4,7 +4,7 @@ Stages (each resumable, outputs under a separate analysis directory):
 
   score       DHF1K forward pass; KL / CC / SIM / peak distance / shape mismatch
               of the one prediction vs ``maps/0032.png``  -> dhf1k_scores.jsonl
-  select      rank-normalized disagreement score, percentile + minimum cap
+  select      rank every window; keep all eligible ones for review
               -> ranking.jsonl, selection.json, candidates.jsonl, media/
   adjudicate  VLM verdict, then Sol box correction for gt_likely_wrong only
               -> vlm_results.jsonl, media/<id>_review.png
@@ -101,20 +101,21 @@ def _exclusion_reason(components: dict) -> str | None:
 def rank_disagreements(
     rows: list[dict],
     *,
-    top_percent: float = 5.0,
-    min_candidates: int = 50,
-    max_candidates: int = 400,
+    top_percent: float = 100.0,
+    min_candidates: int = 0,
+    max_candidates: int | None = None,
 ) -> tuple[list[dict], dict]:
     """Rank windows on last-frame components only; mark candidates.
 
     Each component is rank-normalized across eligible windows (direction so
-    1 = strongest disagreement) and averaged. The candidate count is
-    ``ceil(top_percent% of eligible)``, raised to ``min_candidates`` and capped
-    at ``max_candidates``. The threshold is the score of the last candidate.
+    1 = strongest disagreement) and averaged. By default every eligible window
+    is a candidate. ``top_percent`` keeps only that share, ``min_candidates``
+    raises the count, and ``max_candidates`` caps it. The threshold is the
+    score of the last candidate.
     """
     if not (0.0 < top_percent <= 100.0):
         raise SystemExit("--top-percent must be in (0, 100]")
-    if min_candidates < 0 or max_candidates < 1:
+    if min_candidates < 0 or (max_candidates is not None and max_candidates < 1):
         raise SystemExit("--min-candidates must be >= 0 and --max-candidates >= 1")
     out = []
     eligible = []
@@ -146,7 +147,9 @@ def rank_disagreements(
 
     n_eligible = len(eligible)
     n_percent = int(math.ceil(n_eligible * top_percent / 100.0)) if n_eligible else 0
-    n_select = min(max(n_percent, min_candidates), max_candidates, n_eligible)
+    n_select = min(max(n_percent, min_candidates), n_eligible)
+    if max_candidates is not None:
+        n_select = min(n_select, max_candidates)
     for rank, entry in enumerate(eligible, start=1):
         entry["rank"] = rank
         entry["candidate"] = rank <= n_select
@@ -266,9 +269,9 @@ def select_candidates(
     *,
     split_root: str | None = None,
     pre_split_root: str | None = None,
-    top_percent: float = 5.0,
-    min_candidates: int = 50,
-    max_candidates: int = 400,
+    top_percent: float = 100.0,
+    min_candidates: int = 0,
+    max_candidates: int | None = None,
     resume: bool = True,
 ) -> dict:
     scores_path = os.path.join(out_dir, "dhf1k_scores.jsonl")
@@ -568,9 +571,9 @@ def run_audit_dhf1k(
     batch_size: int = 16,
     num_workers: int = 4,
     device_name: str | None = None,
-    top_percent: float = 5.0,
-    min_candidates: int = 50,
-    max_candidates: int = 400,
+    top_percent: float = 100.0,
+    min_candidates: int = 0,
+    max_candidates: int | None = None,
     vlm_model: str = DEFAULT_VLM_MODEL,
     limit: int | None = None,
     ids: list[str] | None = None,
