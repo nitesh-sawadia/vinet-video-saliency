@@ -174,6 +174,67 @@ def compute_temporal_features(gt_maps_thw: np.ndarray) -> dict:
     }
 
 
+def _minmax01(sal: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    low = float(sal.min())
+    high = float(sal.max())
+    return (sal - low) / max(high - low, eps)
+
+
+def shape_mismatch(pred: np.ndarray, gt: np.ndarray, level: float = 0.5) -> float:
+    """1 - IoU of the regions at or above ``level`` of each map's min-max range."""
+    pred_mask = _minmax01(np.asarray(pred, dtype=np.float64)) >= level
+    gt_mask = _minmax01(np.asarray(gt, dtype=np.float64)) >= level
+    union = int(np.logical_or(pred_mask, gt_mask).sum())
+    if union == 0:
+        return 0.0
+    return float(1.0 - np.logical_and(pred_mask, gt_mask).sum() / union)
+
+
+def last_frame_disagreement(pred: np.ndarray, gt: np.ndarray) -> dict:
+    """KL, CC, SIM, peak distance, and shape mismatch for one (pred, GT) pair.
+
+    ``gt`` is the single last-frame map (``maps/0032.png``). Metric definitions
+    match the batched torch scorer in score.py.
+    """
+    pred = np.asarray(pred, dtype=np.float64)
+    gt = np.asarray(gt, dtype=np.float64)
+    if pred.shape != gt.shape or pred.ndim != 2:
+        raise ValueError("pred/gt must be matching HxW maps: %s vs %s" % (pred.shape, gt.shape))
+    eps_kl = 2.2204e-16
+    s_prob = pred / max(float(pred.sum()), eps_kl)
+    g_prob = gt / max(float(gt.sum()), eps_kl)
+    kldiv = float((g_prob * np.log(eps_kl + g_prob / (s_prob + eps_kl))).sum())
+
+    s_c = pred.reshape(-1) - pred.mean()
+    g_c = gt.reshape(-1) - gt.mean()
+    denom = float(np.sqrt((s_c * s_c).sum() * (g_c * g_c).sum()))
+    cc = float((s_c * g_c).sum() / denom) if denom > 1e-12 else 0.0
+
+    s_n = _minmax01(pred)
+    g_n = _minmax01(gt)
+    s_n = s_n / max(float(s_n.sum()), 1e-8)
+    g_n = g_n / max(float(g_n.sum()), 1e-8)
+    sim = float(np.minimum(s_n, g_n).sum())
+
+    height, width = gt.shape
+    gy, gx = _peak_yx(gt)
+    py, px = _peak_yx(pred)
+    peak_dist = float(
+        np.hypot((gy - py) / max(height - 1, 1), (gx - px) / max(width - 1, 1))
+    )
+    return {
+        "kldiv": kldiv,
+        "cc": cc,
+        "sim": sim,
+        "peak_distance_norm": peak_dist,
+        "shape_mismatch": shape_mismatch(pred, gt),
+        "gt_peak_yx": [gy, gx],
+        "pred_peak_yx": [py, px],
+        "gt_mass": float(gt.sum()),
+        "pred_range": float(pred.max() - pred.min()),
+    }
+
+
 def compute_map_features(
     pred: np.ndarray,
     gt: np.ndarray,

@@ -70,6 +70,16 @@ HYPOTHESES = [
         ),
     },
     {
+        "id": "sol_conservative",
+        "title": "Sol boxes miss temporally consistent salience",
+        "description": (
+            "Sol boxes fail to mark the true visual focus: too conservative "
+            "(tiny ball/logo/prop), wrong target, or flickering inside one scene. "
+            "Good GT needs a stable relevant track within each continuous shot; "
+            "the target may change only when the scene/shot itself changes."
+        ),
+    },
+    {
         "id": "low_visibility",
         "title": "Low visibility",
         "description": "Dark, low-contrast, occluded, or tiny target in frame.",

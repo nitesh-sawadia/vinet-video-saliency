@@ -175,6 +175,219 @@ def _sim_per_sample(s_map: torch.Tensor, gt: torch.Tensor, eps: float = 1e-8) ->
     return torch.min(s_n, g_n).reshape(batch, -1).sum(dim=1)
 
 
+def _last_frame_dataset_cls():
+    """Dataset class built lazily so ViNet_S is only imported when scoring."""
+    _ensure_vinet_path()
+    from torch.utils.data import Dataset
+    import outplay_dataset as od
+
+    class LastFrameGtWindows(Dataset):
+        """Val windows -> (index, 32-frame clip, maps/0032.png only).
+
+        The other 31 maps are never opened: the audit compares one prediction
+        with the last-frame GT the training loss reads.
+        """
+
+        def __init__(self, split_root: str, split: str = "val"):
+            manifest_path = os.path.join(split_root, "split_manifest.json")
+            if not os.path.isfile(manifest_path):
+                raise FileNotFoundError("Outplay manifest not found: %s" % manifest_path)
+            with open(manifest_path) as handle:
+                manifest = json.load(handle)
+            windows = manifest.get("windows") if isinstance(manifest, dict) else None
+            if not isinstance(windows, list):
+                raise ValueError("Outplay manifest has no windows list: %s" % manifest_path)
+            self.paths = [
+                od.window_path(split_root, window)
+                for window in windows
+                if isinstance(window, dict) and window.get("split") == split
+            ]
+            self.last_map_name = od.frame_names()[-1]
+
+        def __len__(self):
+            return len(self.paths)
+
+        def __getitem__(self, index):
+            path = self.paths[index]
+            frames = []
+            for name in od.frame_names():
+                frame_path = os.path.join(path, "images", name)
+                if not os.path.isfile(frame_path):
+                    raise FileNotFoundError("Outplay window is missing %s" % frame_path)
+                frames.append(od._load_frame(frame_path))
+            map_path = os.path.join(path, "maps", self.last_map_name)
+            if not os.path.isfile(map_path):
+                raise FileNotFoundError("Outplay window is missing %s" % map_path)
+            clip = torch.stack(frames, dim=0).float()
+            gt = od._load_map(map_path).float()
+            return index, clip, gt
+
+    return LastFrameGtWindows
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_head() -> str | None:
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _save_pred_png(path: str, pred: np.ndarray) -> None:
+    low, high = float(pred.min()), float(pred.max())
+    scaled = (pred - low) / max(high - low, 1e-8)
+    cv2.imwrite(path, np.round(scaled * 255.0).astype(np.uint8))
+
+
+def score_dhf1k_baseline(
+    checkpoint_path: str,
+    split_root: str,
+    out_dir: str,
+    *,
+    batch_size: int = 16,
+    num_workers: int = 4,
+    device_name: str | None = None,
+    resume: bool = True,
+    model=None,
+) -> dict:
+    """Score DHF1K on every val window against maps/0032.png only.
+
+    Writes ``dhf1k_scores.jsonl`` (KL, CC, SIM, peak distance, shape mismatch
+    per window) and ``preds/<id>.png`` (min-max uint8 prediction). Rows are
+    appended so an interrupted run resumes at the first unscored window.
+    ``model`` lets tests inject a stand-in network.
+    """
+    from torch.utils.data import Subset
+
+    from features import last_frame_disagreement
+
+    if batch_size < 1:
+        raise SystemExit("--batch-size must be >= 1")
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    os.makedirs(out_dir, exist_ok=True)
+    preds_dir = os.path.join(out_dir, "preds")
+    os.makedirs(preds_dir, exist_ok=True)
+    scores_path = os.path.join(out_dir, "dhf1k_scores.jsonl")
+    provenance_path = os.path.join(out_dir, "audit_manifest.json")
+
+    manifest_path = os.path.join(split_root, "split_manifest.json")
+    provenance = {
+        "kind": "dhf1k_disagreement_audit",
+        "checkpoint": os.path.abspath(checkpoint_path),
+        "checkpoint_sha256": _sha256_file(checkpoint_path),
+        "split_root": os.path.abspath(split_root),
+        "split": "val",
+        "split_manifest_sha256": _sha256_file(manifest_path),
+        "gt_map": "maps/0032.png",
+        "git_head": _git_head(),
+    }
+    if os.path.isfile(provenance_path):
+        with open(provenance_path) as handle:
+            prior = json.load(handle)
+        for key in ("checkpoint_sha256", "split_root", "split_manifest_sha256"):
+            if prior.get(key) != provenance[key]:
+                raise SystemExit(
+                    "%s in %s does not match this run (%s); use a new --out"
+                    % (key, provenance_path, provenance[key])
+                )
+        provenance = prior
+    elif os.path.isfile(scores_path):
+        raise SystemExit("%s exists without audit_manifest.json; use a new --out" % scores_path)
+
+    done: set[str] = set()
+    if resume and os.path.isfile(scores_path):
+        with open(scores_path) as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    done.add(json.loads(line)["relpath"])
+    elif os.path.isfile(scores_path):
+        os.remove(scores_path)
+        done = set()
+
+    dataset = _last_frame_dataset_cls()(split_root, "val")
+    if not len(dataset):
+        raise SystemExit("No val windows in %s" % manifest_path)
+    todo = [
+        i
+        for i, path in enumerate(dataset.paths)
+        if _path_meta(path, split_root)["relpath"] not in done
+    ]
+    print(
+        "DHF1K audit: val windows=%d already scored=%d remaining=%d"
+        % (len(dataset), len(dataset) - len(todo), len(todo)),
+        flush=True,
+    )
+
+    ckpt_meta = provenance.get("checkpoint_meta") or {}
+    if todo:
+        if model is None:
+            print("Loading checkpoint on %s ..." % device, flush=True)
+            model, ckpt_meta = load_model(checkpoint_path, device)
+        loader = DataLoader(
+            Subset(dataset, todo),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+        )
+        tic = time.time()
+        scored = 0
+        with open(scores_path, "a") as handle, torch.no_grad():
+            for batch_i, (indices, clips, gts) in enumerate(loader):
+                clips = clips.to(device, non_blocking=True)
+                gts = gts.to(device, non_blocking=True)
+                preds = _squeeze_pred(model(clips.permute(0, 2, 1, 3, 4)))
+                preds = _resize_pred_to_gt(preds, gts)
+                preds_cpu = preds.detach().float().cpu().numpy()
+                gts_cpu = gts.detach().float().cpu().numpy()
+                for b in range(int(clips.shape[0])):
+                    index = int(indices[b])
+                    meta = _path_meta(dataset.paths[index], split_root)
+                    sample_id = "%05d_%s" % (index, meta["window"])
+                    pred_rel = "preds/%s.png" % sample_id
+                    _save_pred_png(os.path.join(out_dir, pred_rel), preds_cpu[b])
+                    row = {
+                        "id": sample_id,
+                        "index": index,
+                        **meta,
+                        "components": last_frame_disagreement(preds_cpu[b], gts_cpu[b]),
+                        "pred_png": pred_rel,
+                    }
+                    handle.write(json.dumps(row) + "\n")
+                    scored += 1
+                handle.flush()
+                if (batch_i + 1) % 5 == 0 or scored == len(todo):
+                    print(
+                        "scored %d/%d  elapsed=%.1fs" % (scored, len(todo), time.time() - tic),
+                        flush=True,
+                    )
+        _release_cuda_after_inference(model, loader)
+
+    provenance["checkpoint_meta"] = ckpt_meta
+    provenance["n_val"] = len(dataset)
+    with open(provenance_path, "w") as handle:
+        json.dump(provenance, handle, indent=2)
+        handle.write("\n")
+    return {"scores_path": scores_path, "n_val": len(dataset), "n_scored_now": len(todo)}
+
+
 def score_validation(
     checkpoint_path: str,
     split_root: str,

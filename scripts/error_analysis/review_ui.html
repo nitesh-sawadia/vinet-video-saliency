@@ -160,6 +160,38 @@
       padding: 40px 10px;
       text-align: center;
     }
+    .audit-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 8px;
+      max-width: 1400px;
+    }
+    .audit-grid figure { margin: 0; }
+    .audit-grid figcaption { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .audit-grid img {
+      width: 100%;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #000;
+      display: block;
+    }
+    .actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+    .actions button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 14px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .actions button:hover:not(:disabled) { border-color: var(--accent); }
+    .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .actions button.chosen { border-color: var(--accent-2); background: rgba(139, 213, 181, 0.18); }
+    .actions .saved { color: var(--muted); font-size: 12px; }
+    .actions .saved.err { color: var(--warn); }
+    .card.decided-accept { border-color: rgba(139, 213, 181, 0.6); }
+    .card.decided-reject { border-color: rgba(226, 184, 106, 0.6); }
     @media (max-width: 900px) {
       .layout { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -196,8 +228,9 @@
     let activeBucket = "all";
 
     async function boot() {
-      const res = await fetch("review_index.json");
+      const res = await fetch("review_index.json", { cache: "no-store" });
       DATA = await res.json();
+      if (DATA.kind === "dhf1k_audit") return bootAudit();
       const n = DATA.samples.length;
       const buckets = Object.keys(DATA.bucket_counts || {}).length;
       document.getElementById("subtitle").textContent =
@@ -224,19 +257,23 @@
 
     function renderBuckets() {
       const regenCount = DATA.samples.filter(s => s.gt_regenerated).length;
+      const solBadCount = DATA.samples.filter(s => s.sol_audit && s.sol_audit.sol_adequate === false).length;
       const counts = {
         all: DATA.samples.length,
         gt_regenerated: regenCount,
+        sol_inadequate: solBadCount,
         ...(DATA.bucket_counts || {}),
       };
       const order = [
         "all",
         ...(regenCount ? ["gt_regenerated"] : []),
+        ...(solBadCount ? ["sol_inadequate"] : []),
         ...DATA.hypotheses.map(h => h.id).filter(id => counts[id]),
       ];
       const titles = Object.fromEntries(DATA.hypotheses.map(h => [h.id, h.title]));
       titles.all = "All hard examples";
       titles.gt_regenerated = "GT regenerated";
+      titles.sol_inadequate = "Sol boxes inadequate";
       const root = document.getElementById("buckets");
       root.innerHTML = "";
       order.forEach(id => {
@@ -256,6 +293,8 @@
       let rows = DATA.samples.slice();
       if (activeBucket === "gt_regenerated") {
         rows = rows.filter(s => s.gt_regenerated);
+      } else if (activeBucket === "sol_inadequate") {
+        rows = rows.filter(s => s.sol_audit && s.sol_audit.sol_adequate === false);
       } else if (activeBucket !== "all") {
         rows = rows.filter(s => s.primary_hypothesis === activeBucket ||
           (s.secondary_hypotheses || []).includes(activeBucket));
@@ -290,7 +329,31 @@
         const regenTag = s.gt_regenerated
           ? "<span class='tag regen'>GT regenerated → person</span>"
           : "";
+        const sol = s.sol_audit || null;
+        let solTag = "";
+        if (sol && sol.sol_adequate === true) {
+          solTag = "<span class='tag regen'>Sol boxes OK</span>";
+        } else if (sol && sol.sol_adequate === false) {
+          solTag = "<span class='tag secondary'>Sol inadequate · " +
+            escapeHtml(sol.issue || "other") + "</span>";
+        }
         const rationale = ((s.confirmed || [])[0] || {}).rationale || s.vlm_notes || "";
+        const solMedia = solCorrectedMedia(sol);
+        const solBlock = sol ? (
+          "<div class='rationale'><strong>Sol audit</strong> (goal: temporally consistent salience)" +
+          " · adequate=" + String(sol.sol_adequate) +
+          " · " + escapeHtml(sol.issue || "") +
+          " · conf=" + Number(sol.confidence || 0).toFixed(2) +
+          " · VLM keyframes=" + Number(sol.n_corrected_frames || 0) +
+          " · densified=" + Number(sol.n_dense_frames || 0) + "/32" +
+          (sol.primary_track ? "<br/><em>track:</em> " + escapeHtml(sol.primary_track) : "") +
+          (Array.isArray(sol.scene_change_at) && sol.scene_change_at.length
+            ? "<br/><em>scene changes at frames:</em> " + sol.scene_change_at.join(", ")
+            : "") +
+          "<br/>" + escapeHtml(sol.rationale || "") +
+          solMedia +
+          "</div>"
+        ) : "";
         return "<article class='card'>" +
           "<div class='card-head'><div><h2>" + s.id + "</h2>" +
           "<div class='metrics'><span>" + (s.sport || "") + " / " + (s.game || "") +
@@ -304,7 +367,8 @@
           (s.sol_boxes === false ? "<span style='color:var(--warn)'>no Sol boxes</span>" : "") +
           "</div>" +
           mediaFor(s) +
-          "<div class='tags'>" + regenTag + confirmed + "</div>" +
+          "<div class='tags'>" + regenTag + solTag + confirmed + "</div>" +
+          solBlock +
           (rationale ? "<div class='rationale'>" + escapeHtml(rationale) + "</div>" : "") +
           "</article>";
       }).join("");
@@ -325,11 +389,243 @@
       return "";
     }
 
+    function solCorrectedMedia(sol) {
+      if (!sol) return "";
+      const src = sol.corrected_clip || sol.corrected_preview;
+      if (!src) return "";
+      const bust = "?v=sol-dense32";
+      if (src.endsWith(".webp") || src.endsWith(".gif")) {
+        return "<br/><div class='legend'><span>Green = VLM-corrected track · 32-frame densified @ 8fps</span></div>" +
+          "<img class='panel-img' style='margin-top:6px;max-width:480px' loading='lazy' src='" +
+          src + bust + "' alt='VLM-corrected 32-frame track' />";
+      }
+      return "<br/><div class='legend'><span>Green = VLM-corrected boxes (still)</span></div>" +
+        "<img class='panel-img' style='margin-top:6px;max-width:420px' loading='lazy' src='" +
+        src + bust + "' alt='VLM-corrected boxes' />";
+    }
+
     function escapeHtml(text) {
       return String(text)
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
+        .replaceAll(">", "&gt;")
+        .replaceAll("'", "&#39;")
+        .replaceAll('"', "&quot;");
+    }
+
+    // ---- DHF1K disagreement audit (last frame only) ----
+    let REVIEWS = {};
+    const AUDIT_TITLES = {
+      all: "All candidates",
+      accept_allowed: "Correction proposed",
+      undecided: "Not yet reviewed",
+      decided_accept: "Accepted",
+      decided_reject: "Rejected",
+      decided_skip: "Skipped",
+      gt_correct_model_wrong: "GT correct, model wrong",
+      gt_likely_wrong: "GT likely wrong",
+      both_plausible_or_ambiguous: "Both plausible / ambiguous",
+      insufficient_evidence: "Insufficient evidence",
+      pending: "VLM pending / failed",
+    };
+
+    function disposition(s) {
+      return (s.verdict && s.verdict.status === "ok") ? s.verdict.disposition : "pending";
+    }
+
+    async function bootAudit() {
+      const res = await fetch("/api/reviews", { cache: "no-store" });
+      REVIEWS = res.ok ? await res.json() : {};
+      document.querySelector("header h1").textContent = "DHF1K disagreement audit (last frame)";
+      const sel = DATA.selection || {};
+      document.getElementById("subtitle").textContent =
+        DATA.samples.length + " candidates of " + (sel.n_eligible ?? "?") +
+        " eligible val windows · threshold " + (sel.candidate_threshold ?? "n/a") +
+        " · accept does not edit the dataset";
+      const sortSel = document.getElementById("sort");
+      sortSel.innerHTML = "<option value='rank'>Sort by disagreement rank</option>" +
+        "<option value='confidence'>Sort by VLM confidence</option>" +
+        "<option value='id'>Sort by id</option>";
+      const sports = [...new Set(DATA.samples.map(s => s.sport).filter(Boolean))].sort();
+      const sportSel = document.getElementById("sport");
+      sports.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s; opt.textContent = s;
+        sportSel.appendChild(opt);
+      });
+      document.getElementById("search").addEventListener("input", renderAuditCards);
+      sportSel.addEventListener("change", renderAuditCards);
+      sortSel.addEventListener("change", renderAuditCards);
+      document.getElementById("cards").addEventListener("click", onDecisionClick);
+      renderAuditBuckets();
+      renderAuditCards();
+    }
+
+    function auditMatches(s, bucket) {
+      const rec = REVIEWS[s.id];
+      if (bucket === "all") return true;
+      if (bucket === "accept_allowed") return !!s.accept_allowed;
+      if (bucket === "undecided") return !rec;
+      if (bucket.startsWith("decided_")) return rec && rec.decision === bucket.slice(8);
+      return disposition(s) === bucket;
+    }
+
+    function renderAuditBuckets() {
+      const order = ["all", "accept_allowed", "undecided", "decided_accept", "decided_reject",
+        "decided_skip", "gt_likely_wrong", "gt_correct_model_wrong",
+        "both_plausible_or_ambiguous", "insufficient_evidence", "pending"];
+      const root = document.getElementById("buckets");
+      root.innerHTML = "";
+      order.forEach(id => {
+        const n = DATA.samples.filter(s => auditMatches(s, id)).length;
+        if (!n && id !== "all") return;
+        const btn = document.createElement("button");
+        btn.className = "bucket" + (id === activeBucket ? " active" : "");
+        btn.dataset.bucket = id;
+        btn.innerHTML = "<span class='name'>" + AUDIT_TITLES[id] + "</span>" +
+          "<span class='meta'>" + n + " samples · " + id + "</span>";
+        btn.onclick = () => { activeBucket = id; renderAuditBuckets(); renderAuditCards(); };
+        root.appendChild(btn);
+      });
+    }
+
+    function auditFiltered() {
+      const q = document.getElementById("search").value.trim().toLowerCase();
+      const sport = document.getElementById("sport").value;
+      const sort = document.getElementById("sort").value;
+      let rows = DATA.samples.filter(s => auditMatches(s, activeBucket));
+      if (sport) rows = rows.filter(s => s.sport === sport);
+      if (q) rows = rows.filter(s => [s.id, s.game, s.sport, s.window, disposition(s)]
+        .join(" ").toLowerCase().includes(q));
+      rows.sort((a, b) => {
+        if (sort === "id") return a.id.localeCompare(b.id);
+        if (sort === "confidence") {
+          return ((b.verdict || {}).confidence || 0) - ((a.verdict || {}).confidence || 0);
+        }
+        return (a.rank || 0) - (b.rank || 0);
+      });
+      return rows;
+    }
+
+    function fmt(v, d = 3) {
+      return (typeof v === "number" && isFinite(v)) ? v.toFixed(d) : "n/a";
+    }
+
+    function figure(src, caption) {
+      if (!src) return "";
+      return "<figure><img loading='lazy' src='" + escapeHtml(src) + "' alt='" +
+        escapeHtml(caption) + "' /><figcaption>" + escapeHtml(caption) + "</figcaption></figure>";
+    }
+
+    function auditCard(s) {
+      const c = s.components || {};
+      const m = s.media || {};
+      const v = s.verdict || null;
+      const corr = s.correction || null;
+      const rec = REVIEWS[s.id];
+      const ev = (v && v.evidence) || {};
+      const disp = disposition(s);
+      const ctx = s.context || {};
+      const tags = [
+        "<span class='tag" + (disp === "gt_likely_wrong" ? " secondary" : "") + "'>" +
+          escapeHtml(AUDIT_TITLES[disp] || disp) +
+          (v && v.status === "ok" ? " · " + fmt(v.confidence, 2) : "") + "</span>",
+        corr ? "<span class='tag secondary'>correction: " + escapeHtml(corr.status) + "</span>" : "",
+        ctx.low_visibility ? "<span class='tag secondary'>low visibility</span>" : "",
+        s.sol_targets_last && s.sol_targets_last.length ? "" :
+          "<span class='tag secondary'>no Sol boxes on last frame</span>",
+      ].join("");
+      let verdictBlock = "";
+      if (v && v.status === "ok") {
+        verdictBlock = "<div class='rationale'><strong>VLM verdict</strong> · " +
+          escapeHtml(v.disposition) + " · conf=" + fmt(v.confidence, 2) +
+          "<br/><em>viewer focus:</em> " + escapeHtml(ev.viewer_focus || "") +
+          "<br/><em>Sol boxes cover subject:</em> " + escapeHtml(ev.sol_boxes_cover_subject || "") +
+          " — " + escapeHtml(ev.sol_box_notes || "") +
+          "<br/><em>DHF1K peak lands on:</em> " + escapeHtml(ev.dhf1k_peak_lands_on || "") +
+          "<br/><em>cause:</em> " + escapeHtml(ev.disagreement_cause || "") + "</div>";
+      } else if (v) {
+        verdictBlock = "<div class='rationale'><strong>VLM " + escapeHtml(v.status) +
+          "</strong> " + escapeHtml(v.error || "") + "</div>";
+      }
+      const corrBlock = corr && corr.status !== "not_requested"
+        ? "<div class='rationale'><strong>Sol correction</strong> · " + escapeHtml(corr.status) +
+          (corr.notes ? "<br/>" + escapeHtml(corr.notes) : "") +
+          (corr.error ? "<br/>" + escapeHtml(corr.error) : "") +
+          (corr.detections && corr.detections.length
+            ? "<br/><em>boxes:</em> " + corr.detections.map((d, i) =>
+                "#" + i + " " + escapeHtml(d.label) + " [" + d.bbox_xyxy_norm.map(x => x.toFixed(3)).join(", ") +
+                "] w=" + fmt(d.weight, 2)).join("; ")
+            : "") + "</div>"
+        : "";
+      const chosen = rec ? rec.decision : "";
+      const btn = (decision, label, enabled) =>
+        "<button data-id='" + escapeHtml(s.id) + "' data-decision='" + decision + "'" +
+        (enabled ? "" : " disabled title='Needs verdict gt_likely_wrong and a valid box correction'") +
+        (chosen === decision ? " class='chosen'" : "") + ">" + label + "</button>";
+      const saved = rec
+        ? "<span class='saved'>Saved: <strong>" + escapeHtml(rec.decision) + "</strong> at " +
+          escapeHtml(rec.timestamp) + "</span>"
+        : "<span class='saved'>Not reviewed</span>";
+      return "<article class='card" + (chosen ? " decided-" + chosen : "") + "' data-card='" +
+        escapeHtml(s.id) + "'>" +
+        "<div class='card-head'><div><h2>#" + s.rank + " · " + escapeHtml(s.id) + "</h2>" +
+        "<div class='metrics'><span>" + escapeHtml((s.sport || "") + " / " + (s.game || "")) + "</span>" +
+        "<span>score <strong>" + fmt(s.disagreement_score) + "</strong></span>" +
+        "<span>KL <strong>" + fmt(c.kldiv) + "</strong></span>" +
+        "<span>CC <strong>" + fmt(c.cc) + "</strong></span>" +
+        "<span>SIM <strong>" + fmt(c.sim) + "</strong></span>" +
+        "<span>peak dist <strong>" + fmt(c.peak_distance_norm) + "</strong></span>" +
+        "<span>shape <strong>" + fmt(c.shape_mismatch) + "</strong></span>" +
+        "</div></div><div class='metrics'><span>" + escapeHtml(s.selection_reason || "") +
+        "</span></div></div>" +
+        (s.media_error ? "<div class='rationale'>media error: " + escapeHtml(s.media_error) + "</div>" : "") +
+        "<div class='audit-grid'>" +
+        figure(m.sol, "Last frame + current Sol boxes") +
+        figure(m.gt, "GT maps/0032.png") +
+        figure(m.pred, "DHF1K prediction") +
+        figure(s.proposed_media, "VLM proposed boxes") +
+        "</div>" +
+        "<div class='tags'>" + tags + "</div>" + verdictBlock + corrBlock +
+        "<div class='actions'>" +
+        btn("accept", "Accept correction", !!s.accept_allowed) +
+        btn("reject", "Reject (keep GT)", true) +
+        btn("skip", "Skip", true) + saved + "</div>" +
+        "</article>";
+    }
+
+    function renderAuditCards() {
+      const rows = auditFiltered();
+      const root = document.getElementById("cards");
+      root.innerHTML = rows.length ? rows.map(auditCard).join("")
+        : "<div class='empty'>No samples in this filter.</div>";
+    }
+
+    async function onDecisionClick(event) {
+      const button = event.target.closest("button[data-decision]");
+      if (!button || button.disabled) return;
+      const id = button.dataset.id;
+      const decision = button.dataset.decision;
+      const card = button.closest("article");
+      const status = card.querySelector(".saved");
+      card.querySelectorAll("button[data-decision]").forEach(b => { b.dataset.wasDisabled = b.disabled; b.disabled = true; });
+      try {
+        const res = await fetch("/api/review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, decision }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+        REVIEWS[id] = body;
+        const sample = DATA.samples.find(s => s.id === id);
+        card.outerHTML = auditCard(sample);
+        renderAuditBuckets();
+      } catch (err) {
+        card.querySelectorAll("button[data-decision]").forEach(b => { b.disabled = b.dataset.wasDisabled === "true"; });
+        status.textContent = "Save failed: " + err.message;
+        status.classList.add("err");
+      }
     }
 
     boot().catch(err => {

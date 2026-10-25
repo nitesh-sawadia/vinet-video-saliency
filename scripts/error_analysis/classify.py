@@ -7,7 +7,7 @@ import os
 import time
 
 from hypotheses import HYPOTHESES, HYPOTHESIS_BY_ID, propose_from_features
-from vlm import confirm_hypotheses
+from vlm import DEFAULT_VLM_MODEL, confirm_hypotheses
 
 
 def _read_jsonl(path: str) -> list[dict]:
@@ -23,7 +23,7 @@ def _read_jsonl(path: str) -> list[dict]:
 def classify_hard_examples(
     out_dir: str,
     *,
-    vlm_model: str = "vertex_ai/gemini-2.5-flash",
+    vlm_model: str = DEFAULT_VLM_MODEL,
     skip_vlm: bool = False,
     limit: int | None = None,
 ) -> dict:
