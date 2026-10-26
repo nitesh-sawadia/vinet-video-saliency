@@ -36,7 +36,12 @@ from viz import (
     jet_overlay_u8,
     load_sol_native_targets,
 )
-from vlm import DEFAULT_VLM_MODEL, adjudicate_dhf1k_disagreement, correct_sol_boxes
+from vlm import (
+    DEFAULT_VLM_MODEL,
+    adjudicate_dhf1k_disagreement,
+    correct_sol_boxes,
+    upright_person_boxes,
+)
 
 EXPECTED_SPLIT_NAME = "split_stride8"
 RANK_COMPONENTS = (
@@ -496,10 +501,23 @@ def build_review_index(out_dir: str) -> dict:
         with open(os.path.join(out_dir, "selection.json")) as handle:
             selection = json.load(handle)
     samples = []
+    repaired = 0
     for cand in sorted(candidates, key=lambda c: c.get("rank") or 0):
         result = results.get(str(cand["id"])) or {}
         verdict = {k: v for k, v in (result.get("verdict") or {}).items() if k != "raw"}
         correction = {k: v for k, v in (result.get("correction") or {}).items() if k != "raw"}
+        if correction.get("status") == "valid" and correction.get("detections"):
+            fixed = upright_person_boxes(correction["detections"])
+            if fixed != correction["detections"]:
+                correction["detections"] = fixed
+                result["correction"]["detections"] = fixed
+                proposed_rel = result.get("proposed_media")
+                if proposed_rel:
+                    frame = np.asarray(_open_rgb(out_dir, cand["media"]["frame"]), dtype=np.uint8)
+                    Image.fromarray(draw_indexed_boxes_rgb(frame, fixed)).save(
+                        os.path.join(out_dir, proposed_rel)
+                    )
+                repaired += 1
         samples.append(
             {
                 "id": cand["id"],
@@ -522,6 +540,9 @@ def build_review_index(out_dir: str) -> dict:
                 "accept_allowed": accept_allowed(verdict, correction),
             }
         )
+    if repaired:
+        _write_jsonl(results_path, list(results.values()))
+        print("Corrected swapped axes in %d saved VLM corrections" % repaired, flush=True)
     index = {
         "kind": "dhf1k_audit",
         "selection": selection,

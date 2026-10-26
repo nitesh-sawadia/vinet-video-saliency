@@ -960,7 +960,7 @@ def validate_sol_correction(parsed: dict) -> dict:
     notes = parsed.get("notes")
     if not isinstance(notes, str) or not notes.strip():
         raise VLMValidationError("notes must be a non-empty string")
-    detections = validate_sol_detections(parsed.get("detections"))
+    detections = upright_person_boxes(validate_sol_detections(parsed.get("detections")))
     if issues and not detections:
         raise VLMValidationError(
             "issues_found=true requires the complete corrected detections list"

@@ -319,6 +319,23 @@ class VLMSchemaTest(unittest.TestCase):
         self.assertTrue(out["issues_found"])
         self.assertEqual(len(out["detections"]), 2)
 
+    def test_correction_flat_person_box_is_turned_upright(self):
+        parsed = {
+            "issues_found": True,
+            "notes": "The player box used swapped axes.",
+            "detections": [{
+                "label": "person",
+                "bbox_xyxy_norm": [0.237, 0.246, 0.777, 0.323],
+                "weight": 1.0,
+                "confidence": 0.95,
+            }],
+        }
+        out = vlm.validate_sol_correction(parsed)
+        self.assertEqual(
+            out["detections"][0]["bbox_xyxy_norm"],
+            [0.246, 0.237, 0.323, 0.777],
+        )
+
     def test_correction_rejections(self):
         base = _correction()
         det = base["detections"][0]
