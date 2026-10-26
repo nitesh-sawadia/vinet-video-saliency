@@ -186,6 +186,51 @@ lakefs://sports-outplay-saliency-vinet/v2`, then `make cohub-release` again.
 That creates the next version of `sports-outplay-saliency-vinet`, pointing
 at the new tag.
 
+## 5. Release sports-salient-viewport (ONNX + paired PT)
+
+Sports-agnostic 9:16 viewport head on pretrained ViNet-S. I/O contract:
+[`docs/INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md). Schemas:
+[`schemas/viewport_input_schema.json`](../schemas/viewport_input_schema.json),
+[`schemas/viewport_output_schema.json`](../schemas/viewport_output_schema.json).
+
+Cohub names (cross-tagged):
+
+- `sports-salient-viewport` — flavor `onnx`
+- `sports-salient-viewport-pt` — flavor `pytorch`
+
+Frozen description on first register:
+
+> ViNet-S (Pretrained) with in-graph ImageNet normalize and 9:16 saliency-mass viewport head; sports-agnostic outplay clips at 32x224x384.
+
+Dry-run first (export + CUDA regress still run; S3/Cohub argv are printed only):
+
+```bash
+make release-onnx \
+  CHECKPOINT=/home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt \
+  DRY_RUN=1
+```
+
+Live release (no auto-retry on register):
+
+```bash
+make release-onnx \
+  CHECKPOINT=/home/nitesh_sawadia/vinet_s/weights/vinet_s_dhf1k.pt
+```
+
+Order: `export-viewport` → `regress-viewport` → `upload-viewport-s3` →
+register ONNX + PT (card + `variants publish base`). S3 object:
+
+`s3://aiml-sports-data/onnx_repo/outplay/salient_viewport/co_<git7>_<ts>.onnx`
+
+Subtargets (`export-viewport`, `regress-viewport`, `upload-viewport-s3`,
+`register-viewport-onnx`, `register-viewport-pt`) are callable alone.
+`DATASET_VERSION` defaults to `NA`.
+
+VM extras for this path: `pip install onnx onnxruntime-gpu` (or
+`onnxruntime` if CUDA EP is unavailable). Export/regress need a CUDA GPU.
+
+This path is independent of `make cohub-release` (outplay saliency `.pt`).
+
 ## What this implementation does *not* do
 
 - It never runs the real multi-object upload (`stage_outplay_dataset.py
@@ -193,6 +238,8 @@ at the new tag.
   against the server -- those require the goofys mount (VM-only) and a
   logged-in `cohub` session, and registration isn't idempotent.
 - It never calls `cohub models promote`.
+- `make release-onnx DRY_RUN=1` never writes to S3 or Cohub; a live
+  `make release-onnx` is still an explicit operator step on the VM.
 
 ## Verification done without touching the live server
 

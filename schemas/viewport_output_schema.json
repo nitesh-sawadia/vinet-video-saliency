@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sports-salient-viewport output",
+  "description": "Fit-inside 9:16 viewport for the clip's last frame: float32 [x1, y1, x2, y2, conf]. Bbox corners are normalized to [0, 1] vs 384x224; conf is mean relu'd saliency inside the window (peak_mass / (224*126)).",
+  "type": "array",
+  "minItems": 5,
+  "maxItems": 5,
+  "items": { "type": "number" },
+  "x-name": "bbox_conf",
+  "x-dtype": "float32",
+  "x-shape": [5],
+  "x-layout": "x1, y1, x2, y2, conf",
+  "x-bbox": {
+    "normalized": true,
+    "frame_width": 384,
+    "frame_height": 224,
+    "aspect": "9:16",
+    "viewport_width_px": 126,
+    "viewport_height_px": 224
+  },
+  "x-confidence": "peak box-sum of relu'd last-frame saliency divided by viewport area (224*126)"
+}
