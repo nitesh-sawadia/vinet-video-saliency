@@ -80,20 +80,28 @@ class _ReviewStore:
         if isinstance(note, str) and note.strip():
             record["note"] = note.strip()[:2000]
         if decision == "accept":
+            source = payload.get("box_source") or ""
             directed = sample.get("directed_correction") or {}
             correction = sample.get("correction") or {}
-            if directed.get("status") == "valid" and directed.get("detections"):
+            prompted = directed.get("status") == "valid" and directed.get("detections")
+            audited = bool(correction.get("status") == "valid" and correction.get("detections"))
+            if source == "directed" or (not source and prompted):
+                if not prompted:
+                    raise ValueError("no prompted boxes to accept as ground truth")
                 record["accepted_boxes"] = directed["detections"]
                 record["box_source"] = "directed"
                 record["prompt"] = directed.get("prompt")
-            elif sample.get("accept_allowed") and correction.get("detections"):
+            elif source == "vlm" or not source:
+                if not audited:
+                    raise ValueError(
+                        "accept needs a valid box list from the audit or from a directed prompt"
+                    )
                 record["accepted_boxes"] = correction["detections"]
                 record["box_source"] = "vlm"
             else:
-                raise ValueError(
-                    "accept needs a valid box list from the audit or from a directed prompt"
-                )
+                raise ValueError("box_source must be directed or vlm")
             record["frame_index"] = 31
+            record["gt_map"] = "maps/0032.png"
         with self.lock:
             reviews = self.read()
             reviews[sample_id] = record

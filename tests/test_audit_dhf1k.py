@@ -536,9 +536,13 @@ class ReviewServerTest(_FixtureCase):
         self.assertEqual(body["status"], "valid")
         self.assertTrue(body["accept_allowed"])
         self.assertTrue(os.path.isfile(os.path.join(self.out_dir, body["directed_media"])))
-        status, record = self._post({"id": ambiguous_id, "decision": "accept"})
+        status, record = self._post({
+            "id": ambiguous_id, "decision": "accept", "box_source": "directed",
+        })
         self.assertEqual(status, 200)
         self.assertEqual(record["box_source"], "directed")
+        self.assertEqual(record["gt_map"], "maps/0032.png")
+        self.assertEqual(record["frame_index"], 31)
         self.assertEqual(record["prompt"], "the player closest to the camera")
         self.assertEqual(record["accepted_boxes"][0]["label"], "person")
         self.assertEqual(self._post_path("/api/direct-correction", {"id": ambiguous_id, "prompt": "  "})[0], 400)

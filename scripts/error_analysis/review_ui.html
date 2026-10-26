@@ -582,14 +582,22 @@
                 "] w=" + fmt(d.weight, 2)).join("; ")
             : "") + "</div>"
         : "";
-      const chosen = rec ? rec.decision : "";
-      const btn = (decision, label, enabled) =>
+      const promptedOk = !!(s.directed_correction && s.directed_correction.status === "valid" &&
+        (s.directed_correction.detections || []).length);
+      const auditOk = !!(s.correction && s.correction.status === "valid" &&
+        (s.correction.detections || []).length);
+      const chosen = (decision, source) =>
+        rec && rec.decision === decision &&
+        (decision !== "accept" || (rec.box_source || "vlm") === (source || "vlm"));
+      const btn = (decision, label, enabled, source) =>
         "<button data-id='" + escapeHtml(s.id) + "' data-decision='" + decision + "'" +
-        (enabled ? "" : " disabled title='Needs verdict gt_likely_wrong and a valid box correction'") +
-        (chosen === decision ? " class='chosen'" : "") + ">" + label + "</button>";
+        (source ? " data-source='" + source + "'" : "") +
+        (enabled ? "" : " disabled") +
+        (chosen(decision, source) ? " class='chosen'" : "") + ">" + label + "</button>";
       const saved = rec
-        ? "<span class='saved'>Saved: <strong>" + escapeHtml(rec.decision) + "</strong> at " +
-          escapeHtml(rec.timestamp) + "</span>"
+        ? "<span class='saved'>Saved: <strong>" + escapeHtml(
+            rec.box_source === "directed" ? "prompted boxes as GT" : rec.decision
+          ) + "</strong> at " + escapeHtml(rec.timestamp) + "</span>"
         : "<span class='saved'>Not reviewed</span>";
       return "<article class='card" + (chosen ? " decided-" + chosen : "") + "' data-card='" +
         escapeHtml(s.id) + "'>" +
@@ -614,9 +622,11 @@
         "<div class='tags'>" + tags + "</div>" + verdictBlock + corrBlock +
         directedBlock(s) +
         "<div class='actions'>" +
-        btn("accept", "Accept correction", !!s.accept_allowed) +
+        btn("accept", "Accept audit correction", auditOk, "vlm") +
+        btn("accept", "Accept prompted boxes as GT", promptedOk, "directed") +
         btn("reject", "Reject (keep GT)", true) +
         btn("skip", "Skip", true) + saved + "</div>" +
+        "<p class='saved'>Prompted boxes replace ground truth for this window's last frame only (maps/0032.png). They are not copied onto the other 31 frames.</p>" +
         "<div class='direct'>" +
         "<textarea data-direct-prompt placeholder='What should be marked as salient on this frame'></textarea>" +
         "<div class='row'><button type='button' data-direct='1' data-id='" + escapeHtml(s.id) +
@@ -683,7 +693,11 @@
         const res = await fetch("/api/review", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, decision }),
+          body: JSON.stringify({
+            id,
+            decision,
+            box_source: button.dataset.source || undefined,
+          }),
         });
         const body = await res.json();
         if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
