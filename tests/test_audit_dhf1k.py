@@ -443,14 +443,17 @@ class ReviewServerTest(_FixtureCase):
     def _url(self, path):
         return "http://127.0.0.1:%d%s" % (self.port, path)
 
-    def _post(self, payload):
-        req = urllib.request.Request(self._url("/api/review"), data=json.dumps(payload).encode(),
+    def _post_path(self, path, payload):
+        req = urllib.request.Request(self._url(path), data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
+
+    def _post(self, payload):
+        return self._post_path("/api/review", payload)
 
     def _get_json(self, path):
         with urllib.request.urlopen(self._url(path), timeout=10) as resp:
@@ -474,7 +477,7 @@ class ReviewServerTest(_FixtureCase):
 
         status, body = self._post({"id": ambiguous_id, "decision": "accept"})
         self.assertEqual(status, 400)
-        self.assertIn("gt_likely_wrong", body["error"])
+        self.assertIn("valid box list", body["error"])
         self.assertEqual(self._post({"id": ambiguous_id, "decision": "skip"})[0], 200)
         self.assertEqual(self._post({"id": "nope", "decision": "reject"})[0], 400)
         self.assertEqual(self._post({"id": accept_id, "decision": "maybe"})[0], 400)
@@ -490,11 +493,40 @@ class ReviewServerTest(_FixtureCase):
 
         self.assertEqual(_tree_digest(self.split_root), self.split_digest)
 
+    def test_directed_prompt_boxes_can_be_accepted(self):
+        ambiguous_id = self.ids[1]
+        self.server.RequestHandlerClass.func.store.box_fn = lambda image, prompt, sample: {
+            "status": "valid",
+            "notes": "Boxed the near-side player.",
+            "detections": [
+                {"label": "person", "bbox_xyxy_norm": [0.2, 0.2, 0.4, 0.8],
+                 "weight": 1.0, "confidence": 0.95},
+            ],
+            "model": "test",
+        }
+        status, body = self._post_path("/api/direct-correction", {
+            "id": ambiguous_id,
+            "prompt": "the player closest to the camera",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "valid")
+        self.assertTrue(body["accept_allowed"])
+        self.assertTrue(os.path.isfile(os.path.join(self.out_dir, body["directed_media"])))
+        status, record = self._post({"id": ambiguous_id, "decision": "accept"})
+        self.assertEqual(status, 200)
+        self.assertEqual(record["box_source"], "directed")
+        self.assertEqual(record["prompt"], "the player closest to the camera")
+        self.assertEqual(record["accepted_boxes"][0]["label"], "person")
+        self.assertEqual(self._post_path("/api/direct-correction", {"id": ambiguous_id, "prompt": "  "})[0], 400)
+        self.assertEqual(_tree_digest(self.split_root), self.split_digest)
+
     def test_ui_and_media_are_served(self):
         with urllib.request.urlopen(self._url("/"), timeout=10) as resp:
             html = resp.read().decode()
         self.assertIn("bootAudit", html)
         self.assertIn("/api/review", html)
+        self.assertIn("/api/direct-correction", html)
+        self.assertIn("Ask VLM for these boxes", html)
         sample = self._get_json("/review_index.json")["samples"][0]
         for rel in sample["media"].values():
             with urllib.request.urlopen(self._url("/" + rel), timeout=10) as resp:

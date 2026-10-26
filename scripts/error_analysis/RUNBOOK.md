@@ -66,8 +66,10 @@ python -m error_analysis review --out ~/analysis/dhf1k_audit_stride8
 Serves `http://127.0.0.1:8765/`. If the audit dir is on the VM, tunnel instead:
 `ssh -L 8765:127.0.0.1:8765 <vm>` and run `review --no-browser` there.
 
-Per card: **Accept correction** (only for `gt_likely_wrong` with a valid box
-list), **Reject** (keep current GT), **Skip**. Each click POSTs to the server,
+Per card: **Accept correction** (a valid audit correction, or boxes from a
+directed prompt), **Reject** (keep current GT), **Skip**. The prompt box asks
+Gemini to box only what you describe as salient on that frame; Accept then
+stores those boxes. Each click POSTs to the server,
 which writes `human_reviews.json` in the audit dir keyed by sample id
 (decision, timestamp, and for accept the boxes from the review index). A new
 choice overwrites that sample. Accept does not touch the dataset.

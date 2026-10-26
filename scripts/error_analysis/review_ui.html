@@ -190,6 +190,13 @@
     .actions button.chosen { border-color: var(--accent-2); background: rgba(139, 213, 181, 0.18); }
     .actions .saved { color: var(--muted); font-size: 12px; }
     .actions .saved.err { color: var(--warn); }
+    .direct { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .direct textarea {
+      width: 100%; min-height: 64px; resize: vertical; background: var(--bg);
+      color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+      font: inherit;
+    }
+    .direct .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .card.decided-accept { border-color: rgba(139, 213, 181, 0.6); }
     .card.decided-reject { border-color: rgba(226, 184, 106, 0.6); }
     @media (max-width: 900px) {
@@ -456,7 +463,10 @@
       document.getElementById("search").addEventListener("input", renderAuditCards);
       sportSel.addEventListener("change", renderAuditCards);
       sortSel.addEventListener("change", renderAuditCards);
-      document.getElementById("cards").addEventListener("click", onDecisionClick);
+      document.getElementById("cards").addEventListener("click", (event) => {
+        if (event.target.closest("button[data-direct]")) onDirectClick(event);
+        else onDecisionClick(event);
+      });
       renderAuditBuckets();
       renderAuditCards();
     }
@@ -515,6 +525,20 @@
       if (!src) return "";
       return "<figure><img loading='lazy' src='" + escapeHtml(src) + "' alt='" +
         escapeHtml(caption) + "' /><figcaption>" + escapeHtml(caption) + "</figcaption></figure>";
+    }
+
+    function directedBlock(s) {
+      const d = s.directed_correction;
+      if (!d) return "";
+      return "<div class='rationale'><strong>Your prompt</strong> · " + escapeHtml(d.status) +
+        "<br/>" + escapeHtml(d.prompt || "") +
+        (d.notes ? "<br/><em>VLM:</em> " + escapeHtml(d.notes) : "") +
+        (d.error ? "<br/>" + escapeHtml(d.error) : "") +
+        (d.detections && d.detections.length
+          ? "<br/><em>boxes:</em> " + d.detections.map((det, i) =>
+              "#" + i + " " + escapeHtml(det.label) + " [" +
+              det.bbox_xyxy_norm.map(x => Number(x).toFixed(3)).join(", ") + "]").join("; ")
+          : "") + "</div>";
     }
 
     function auditCard(s) {
@@ -585,12 +609,18 @@
         figure(m.gt, "GT maps/0032.png") +
         figure(m.pred, "DHF1K prediction") +
         figure(s.proposed_media, "VLM proposed boxes") +
+        figure(s.directed_media, "Boxes for your description") +
         "</div>" +
         "<div class='tags'>" + tags + "</div>" + verdictBlock + corrBlock +
+        directedBlock(s) +
         "<div class='actions'>" +
         btn("accept", "Accept correction", !!s.accept_allowed) +
         btn("reject", "Reject (keep GT)", true) +
         btn("skip", "Skip", true) + saved + "</div>" +
+        "<div class='direct'>" +
+        "<textarea data-direct-prompt placeholder='What should be marked as salient on this frame'></textarea>" +
+        "<div class='row'><button type='button' data-direct='1' data-id='" + escapeHtml(s.id) +
+        "'>Ask VLM for these boxes</button><span class='saved direct-status'></span></div></div>" +
         "</article>";
     }
 
@@ -599,6 +629,46 @@
       const root = document.getElementById("cards");
       root.innerHTML = rows.length ? rows.map(auditCard).join("")
         : "<div class='empty'>No samples in this filter.</div>";
+    }
+
+    async function onDirectClick(event) {
+      const button = event.target.closest("button[data-direct]");
+      if (!button || button.disabled) return;
+      const card = button.closest("article");
+      const prompt = card.querySelector("[data-direct-prompt]").value.trim();
+      const status = card.querySelector(".direct-status");
+      if (!prompt) {
+        status.textContent = "Describe what should be salient.";
+        status.classList.add("err");
+        return;
+      }
+      button.disabled = true;
+      status.classList.remove("err");
+      status.textContent = "Asking the VLM…";
+      try {
+        const res = await fetch("/api/direct-correction", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: button.dataset.id, prompt }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+        const sample = DATA.samples.find(s => s.id === button.dataset.id);
+        sample.directed_correction = {
+          status: body.status, notes: body.notes, detections: body.detections,
+          error: body.error, prompt: body.prompt,
+        };
+        if (body.directed_media) {
+          sample.directed_media = body.directed_media + "?v=" + Date.now();
+        }
+        if (body.accept_allowed) sample.accept_allowed = true;
+        card.outerHTML = auditCard(sample);
+        renderAuditBuckets();
+      } catch (err) {
+        button.disabled = false;
+        status.textContent = "Request failed: " + err.message;
+        status.classList.add("err");
+      }
     }
 
     async function onDecisionClick(event) {

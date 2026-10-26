@@ -1204,6 +1204,91 @@ def adjudicate_dhf1k_disagreement(
     return {"status": "ok", **verdict, "attempts": len(raws), "raw": raws[-1], "model": model}
 
 
+def build_directed_box_content(image: Image.Image, instruction: str, *, sport: str) -> list[dict]:
+    """Ask for boxes for the salient thing a reviewer named, on one clean frame."""
+    width, height = image.size
+    text = "\n".join(
+        [
+            "You are given 1 frame from a live %s broadcast. Image size is %d x %d pixels."
+            % (sport or "sports", width, height),
+            "",
+            "A reviewer rejected both the current ground-truth boxes and any previously "
+            "proposed boxes. They say what should be marked as salient on this frame:",
+            instruction.strip(),
+            "",
+            "Draw boxes only for what the reviewer described. Do not box anything else.",
+            "",
+            "Coordinates are normalized xyxy on THIS image: x_min, y_min, x_max, y_max "
+            "are floats in [0, 1]. Origin is the top-left, x increases right, y increases "
+            "down. Do not return pixel values. Do not return 0-1000 coordinates.",
+            "",
+            "label must be exactly one of: person, ball, object.",
+            "- person: tight box around the full visible body, head to feet, or around "
+            "the head and shoulders on a close-up. Not the court around them.",
+            "- ball: tight box around the ball only, not the player near it.",
+            "- object: tight box around that object only, not the arm or the stand behind it.",
+            "",
+            "Usually one box. A second box only when the reviewer described more than one "
+            "target. weight values are in (0, 1] and sum to 1. confidence is your certainty, "
+            "from 0 to 1.",
+            "Tight boxes only. Never box the whole court or the whole frame.",
+            "Judge this image on its own. Return detections for this image.",
+            "",
+            "Return ONLY one JSON object: {\"notes\": one short sentence, \"detections\": "
+            "[{\"label\": string, \"bbox_xyxy_norm\": [x_min, y_min, x_max, y_max], "
+            "\"weight\": number, \"confidence\": number}]}.",
+        ]
+    )
+    return [{"type": "text", "text": text}, _image_part(image, quality=90)]
+
+
+def validate_directed_boxes(parsed: dict) -> dict:
+    if not isinstance(parsed, dict):
+        raise VLMValidationError("directed boxes must be a JSON object")
+    notes = parsed.get("notes")
+    if not isinstance(notes, str) or not notes.strip():
+        raise VLMValidationError("notes must be a non-empty string")
+    detections = validate_sol_detections(parsed.get("detections"))
+    if not detections:
+        raise VLMValidationError("detections must list the boxes for what the reviewer described")
+    return {"notes": notes.strip(), "detections": detections}
+
+
+def direct_sol_boxes(
+    image: Image.Image,
+    instruction: str,
+    *,
+    sport: str = "sports",
+    model: str = DEFAULT_VLM_MODEL,
+    timeout: float = 180.0,
+    transport=None,
+) -> dict:
+    """Boxes for a reviewer-named salient target. status valid|invalid|error."""
+    instruction = (instruction or "").strip()
+    if not instruction:
+        return {"status": "invalid", "error": "prompt is empty", "detections": [], "model": model}
+    content = build_directed_box_content(image, instruction, sport=sport)
+    try:
+        result, raws = _generate_validated(
+            content,
+            validate_directed_boxes,
+            transport=transport or _default_transport,
+            model=model,
+            timeout=timeout,
+            temperature=0.1,
+        )
+    except VLMValidationError as exc:
+        return {"status": "invalid", "error": str(exc), "detections": [], "model": model}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "detections": [], "model": model}
+    return {
+        "status": "valid",
+        **result,
+        "attempts": len(raws),
+        "model": model,
+    }
+
+
 def correct_sol_boxes(
     sample: dict,
     *,

@@ -5,11 +5,14 @@ server also records decisions:
 
   GET  /api/reviews  -> human_reviews.json (``{}`` when none yet)
   POST /api/review   {"id": ..., "decision": "accept"|"reject"|"skip", "note": ...}
+  POST /api/direct-correction  {"id": ..., "prompt": ...}
 
 Decisions are written to ``human_reviews.json`` in the audit directory, keyed
 by sample id; a new decision overwrites that sample's record. Accepted boxes
 are copied from the server-side review index, never from the request body.
-Nothing outside the audit directory is written.
+A direct-correction prompt asks the VLM to box what the reviewer described
+and stores those boxes on the sample. Nothing outside the audit directory
+is written.
 """
 
 from __future__ import annotations
@@ -25,15 +28,24 @@ import threading
 import time
 import webbrowser
 
+import numpy as np
+from PIL import Image
+
+from viz import draw_indexed_boxes_rgb
+from vlm import DEFAULT_VLM_MODEL, direct_sol_boxes
+
 REVIEW_DECISIONS = ("accept", "reject", "skip")
 _MAX_BODY_BYTES = 64 * 1024
 
 
 class _ReviewStore:
-    def __init__(self, out_dir: str):
+    def __init__(self, out_dir: str, box_fn=None):
         self.out_dir = out_dir
         self.path = os.path.join(out_dir, "human_reviews.json")
+        self.index_path = os.path.join(out_dir, "review_index.json")
+        self.directed_path = os.path.join(out_dir, "directed_corrections.json")
         self.lock = threading.Lock()
+        self.box_fn = box_fn or _call_directed_boxes
 
     def _samples(self) -> dict:
         with open(os.path.join(self.out_dir, "review_index.json")) as handle:
@@ -68,12 +80,19 @@ class _ReviewStore:
         if isinstance(note, str) and note.strip():
             record["note"] = note.strip()[:2000]
         if decision == "accept":
+            directed = sample.get("directed_correction") or {}
             correction = sample.get("correction") or {}
-            if not sample.get("accept_allowed") or not correction.get("detections"):
+            if directed.get("status") == "valid" and directed.get("detections"):
+                record["accepted_boxes"] = directed["detections"]
+                record["box_source"] = "directed"
+                record["prompt"] = directed.get("prompt")
+            elif sample.get("accept_allowed") and correction.get("detections"):
+                record["accepted_boxes"] = correction["detections"]
+                record["box_source"] = "vlm"
+            else:
                 raise ValueError(
-                    "accept needs verdict gt_likely_wrong and a valid box correction"
+                    "accept needs a valid box list from the audit or from a directed prompt"
                 )
-            record["accepted_boxes"] = correction["detections"]
             record["frame_index"] = 31
         with self.lock:
             reviews = self.read()
@@ -84,6 +103,83 @@ class _ReviewStore:
                 handle.write("\n")
             os.replace(tmp, self.path)
         return record
+
+    def direct(self, payload: dict) -> dict:
+        """Ask the VLM to box the salient target the reviewer described."""
+        sample_id = str(payload.get("id") or "")
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must describe what should be marked as salient")
+        prompt = prompt.strip()[:2000]
+        with self.lock:
+            index = self._read_index()
+            samples = index.get("samples") or []
+            sample = next((s for s in samples if str(s.get("id")) == sample_id), None)
+            if sample is None:
+                raise ValueError("unknown sample id %r" % sample_id)
+            frame_rel = (sample.get("media") or {}).get("frame")
+            if not frame_rel:
+                raise ValueError("sample has no last-frame image")
+            frame_path = os.path.join(self.out_dir, frame_rel)
+            image = Image.open(frame_path).convert("RGB")
+            result = self.box_fn(image, prompt, sample)
+            result = {
+                "status": result.get("status") or "error",
+                "notes": result.get("notes") or "",
+                "detections": result.get("detections") or [],
+                "error": result.get("error") or "",
+                "model": result.get("model") or DEFAULT_VLM_MODEL,
+                "prompt": prompt,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            media_rel = ""
+            if result["status"] == "valid" and result["detections"]:
+                media_rel = "media/%s_directed.png" % sample_id
+                drawn = draw_indexed_boxes_rgb(np.asarray(image), result["detections"])
+                os.makedirs(os.path.join(self.out_dir, "media"), exist_ok=True)
+                Image.fromarray(drawn).save(os.path.join(self.out_dir, media_rel))
+                sample["directed_media"] = media_rel
+                sample["accept_allowed"] = True
+            sample["directed_correction"] = {
+                key: result[key]
+                for key in ("status", "notes", "detections", "error", "model", "prompt", "timestamp")
+            }
+            self._write_index(index)
+            directed = self._read_json(self.directed_path)
+            directed[sample_id] = sample["directed_correction"]
+            if media_rel:
+                directed[sample_id]["media"] = media_rel
+            self._write_json(self.directed_path, directed)
+        return {
+            "id": sample_id,
+            "status": result["status"],
+            "notes": result["notes"],
+            "detections": result["detections"],
+            "error": result["error"],
+            "directed_media": media_rel,
+            "accept_allowed": bool(sample.get("accept_allowed")),
+            "prompt": prompt,
+        }
+
+    def _read_index(self) -> dict:
+        with open(self.index_path) as handle:
+            return json.load(handle)
+
+    def _write_index(self, index: dict) -> None:
+        self._write_json(self.index_path, index)
+
+    def _read_json(self, path: str) -> dict:
+        if not os.path.isfile(path):
+            return {}
+        with open(path) as handle:
+            return json.load(handle)
+
+    def _write_json(self, path: str, payload: dict) -> None:
+        fd, tmp = tempfile.mkstemp(prefix=".review.", dir=self.out_dir)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
 
 
 class _ReviewHandler(http.server.SimpleHTTPRequestHandler):
@@ -105,7 +201,8 @@ class _ReviewHandler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/api/review":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/api/review", "/api/direct-correction"):
             self._send_json(404, {"error": "not found"})
             return
         try:
@@ -115,14 +212,26 @@ class _ReviewHandler(http.server.SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("body must be a JSON object")
-            record = self.store.record(payload)
-        except (ValueError, json.JSONDecodeError) as exc:
+            if path == "/api/direct-correction":
+                record = self.store.direct(payload)
+            else:
+                record = self.store.record(payload)
+        except (ValueError, json.JSONDecodeError, OSError) as exc:
             self._send_json(400, {"error": str(exc)})
             return
         self._send_json(200, record)
 
 
-def make_review_server(out_dir: str, host: str = "127.0.0.1", port: int = 8765):
+def _call_directed_boxes(image, prompt: str, sample: dict) -> dict:
+    return direct_sol_boxes(
+        image,
+        prompt,
+        sport=str(sample.get("sport") or "sports"),
+        model=DEFAULT_VLM_MODEL,
+    )
+
+
+def make_review_server(out_dir: str, host: str = "127.0.0.1", port: int = 8765, box_fn=None):
     """Build (but do not start) the review HTTP server. ``port=0`` picks a free port."""
     out_dir = os.path.abspath(out_dir)
     index_path = os.path.join(out_dir, "review_index.json")
@@ -133,7 +242,9 @@ def make_review_server(out_dir: str, host: str = "127.0.0.1", port: int = 8765):
     ui_dst = os.path.join(out_dir, "index.html")
     shutil.copyfile(ui_src, ui_dst)
 
-    handler_cls = type("ReviewHandler", (_ReviewHandler,), {"store": _ReviewStore(out_dir)})
+    handler_cls = type(
+        "ReviewHandler", (_ReviewHandler,), {"store": _ReviewStore(out_dir, box_fn=box_fn)}
+    )
     handler = functools.partial(handler_cls, directory=out_dir)
     socketserver.TCPServer.allow_reuse_address = True
     return socketserver.ThreadingTCPServer((host, port), handler)
