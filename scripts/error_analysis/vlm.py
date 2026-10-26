@@ -911,9 +911,15 @@ def validate_sol_detections(detections) -> list[dict]:
                 "detections[%d].label must be one of %s, got %r"
                 % (index, list(SOL_LABELS), label)
             )
-        box = det.get("bbox_xyxy_norm")
+        named = ("x_min", "y_min", "x_max", "y_max")
+        if all(key in det for key in named):
+            box = [det[key] for key in named]
+        else:
+            box = det.get("bbox_xyxy_norm")
         if not isinstance(box, list) or len(box) != 4:
-            raise VLMValidationError("detections[%d].bbox_xyxy_norm must be 4 floats" % index)
+            raise VLMValidationError(
+                "detections[%d] needs x_min, y_min, x_max, y_max" % index
+            )
         coords = [
             _require_unit_float(v, "detections[%d].bbox_xyxy_norm" % index) for v in box
         ]
@@ -1218,13 +1224,16 @@ def build_directed_box_content(image: Image.Image, instruction: str, *, sport: s
             "",
             "Draw boxes only for what the reviewer described. Do not box anything else.",
             "",
-            "Coordinates are normalized xyxy on THIS image: x_min, y_min, x_max, y_max "
-            "are floats in [0, 1]. Origin is the top-left, x increases right, y increases "
-            "down. Do not return pixel values. Do not return 0-1000 coordinates.",
+            "Each box uses four named fields, not an array: x_min, y_min, x_max, y_max. "
+            "They are floats in [0, 1] on THIS image. Origin is the top-left, x increases "
+            "right, y increases down. x_min is the left edge, y_min is the top edge. "
+            "Do not return [y_min, x_min, y_max, x_max]. Do not return pixel values. "
+            "Do not return 0-1000 coordinates.",
             "",
             "label must be exactly one of: person, ball, object.",
             "- person: tight box around the full visible body, head to feet, or around "
-            "the head and shoulders on a close-up. Not the court around them.",
+            "the head and shoulders on a close-up. A standing player is taller than wide. "
+            "Not the court around them.",
             "- ball: tight box around the ball only, not the player near it.",
             "- object: tight box around that object only, not the arm or the stand behind it.",
             "",
@@ -1235,8 +1244,8 @@ def build_directed_box_content(image: Image.Image, instruction: str, *, sport: s
             "Judge this image on its own. Return detections for this image.",
             "",
             "Return ONLY one JSON object: {\"notes\": one short sentence, \"detections\": "
-            "[{\"label\": string, \"bbox_xyxy_norm\": [x_min, y_min, x_max, y_max], "
-            "\"weight\": number, \"confidence\": number}]}.",
+            "[{\"label\": string, \"x_min\": number, \"y_min\": number, \"x_max\": number, "
+            "\"y_max\": number, \"weight\": number, \"confidence\": number}]}.",
         ]
     )
     return [{"type": "text", "text": text}, _image_part(image, quality=90)]
@@ -1248,10 +1257,32 @@ def validate_directed_boxes(parsed: dict) -> dict:
     notes = parsed.get("notes")
     if not isinstance(notes, str) or not notes.strip():
         raise VLMValidationError("notes must be a non-empty string")
-    detections = validate_sol_detections(parsed.get("detections"))
+    detections = upright_person_boxes(validate_sol_detections(parsed.get("detections")))
     if not detections:
         raise VLMValidationError("detections must list the boxes for what the reviewer described")
     return {"notes": notes.strip(), "detections": detections}
+
+
+def upright_person_boxes(detections: list[dict]) -> list[dict]:
+    """Turn a flat person box into a tall one when the axes were swapped.
+
+    Gemini often returns ``[y_min, x_min, y_max, x_max]``. Read as xyxy, a
+    standing player becomes a horizontal strip. Swapping the axes restores
+    the tall box when that swap is itself taller than it is wide.
+    """
+    fixed = []
+    for det in detections:
+        box = [float(v) for v in det["bbox_xyxy_norm"]]
+        width = box[2] - box[0]
+        height = box[3] - box[1]
+        if det.get("label") == "person" and width > 0 and height < width * 0.45:
+            swapped = [box[1], box[0], box[3], box[2]]
+            swapped_w = swapped[2] - swapped[0]
+            swapped_h = swapped[3] - swapped[1]
+            if swapped_w > 0 and swapped_h > swapped_w:
+                box = swapped
+        fixed.append({**det, "bbox_xyxy_norm": [round(v, 5) for v in box]})
+    return fixed
 
 
 def direct_sol_boxes(

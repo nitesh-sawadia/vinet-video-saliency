@@ -290,6 +290,30 @@ class VLMSchemaTest(unittest.TestCase):
             with self.assertRaises(vlm.VLMValidationError, msg=str(item)):
                 vlm.validate_dhf1k_verdict(item)
 
+    def test_flat_person_box_is_turned_upright(self):
+        parsed = {
+            "notes": "players near the penalty line",
+            "detections": [{
+                "label": "person",
+                "bbox_xyxy_norm": [0.418, 0.354, 0.528, 0.375],
+                "weight": 1.0,
+                "confidence": 0.9,
+            }],
+        }
+        box = vlm.validate_directed_boxes(parsed)["detections"][0]["bbox_xyxy_norm"]
+        self.assertAlmostEqual(box[0], 0.354, places=3)
+        self.assertAlmostEqual(box[1], 0.418, places=3)
+        self.assertGreater(box[3] - box[1], box[2] - box[0])
+        tall = {
+            "notes": "one player",
+            "detections": [{
+                "label": "person", "x_min": 0.2, "y_min": 0.1, "x_max": 0.35, "y_max": 0.8,
+                "weight": 1.0, "confidence": 0.9,
+            }],
+        }
+        kept = vlm.validate_directed_boxes(tall)["detections"][0]["bbox_xyxy_norm"]
+        self.assertEqual(kept, [0.2, 0.1, 0.35, 0.8])
+
     def test_valid_correction(self):
         out = vlm.validate_sol_correction(_correction())
         self.assertTrue(out["issues_found"])
