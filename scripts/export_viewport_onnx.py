@@ -45,15 +45,13 @@ def export_serving(wrapper: ViewportONNXWrapper, out_path: str, opset: int, devi
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    torch.onnx.export(
+    _onnx_export(
         wrapper,
         dummy,
         out_path,
-        opset_version=opset,
+        opset=opset,
         input_names=["frames"],
         output_names=["bbox_conf"],
-        dynamic_axes=None,
-        do_constant_folding=True,
     )
 
 
@@ -63,16 +61,29 @@ def export_debug(wrapper: ViewportDebugONNXWrapper, out_path: str, opset: int, d
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    torch.onnx.export(
+    _onnx_export(
         wrapper,
         dummy,
         out_path,
-        opset_version=opset,
+        opset=opset,
         input_names=["frames"],
         output_names=["saliency", "bbox_conf"],
+    )
+
+
+def _onnx_export(model, dummy, out_path, *, opset, input_names, output_names) -> None:
+    """Prefer legacy exporter: dynamo path struggles with argmax-derived coords."""
+    kwargs = dict(
+        opset_version=opset,
+        input_names=input_names,
+        output_names=output_names,
         dynamic_axes=None,
         do_constant_folding=True,
     )
+    try:
+        torch.onnx.export(model, dummy, out_path, dynamo=False, **kwargs)
+    except TypeError:
+        torch.onnx.export(model, dummy, out_path, **kwargs)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

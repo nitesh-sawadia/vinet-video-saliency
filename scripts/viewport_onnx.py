@@ -160,14 +160,13 @@ class _NineSixteenHead(nn.Module):
         # saliency_hw: [H, W]
         maps = F.relu(saliency_hw).unsqueeze(0).unsqueeze(0)
         scores = F.conv2d(maps, self.kernel.to(dtype=maps.dtype)).reshape(-1)
+        # Argmax + gather stays ONNX-friendly (avoid data-dependent Python indexing).
         peak_idx = torch.argmax(scores)
-        peak_mass = scores[peak_idx]
-        # Hout is always 1 for 224x126 on 224x384; keep general formula.
+        peak_mass = torch.gather(scores, 0, peak_idx.reshape(1)).reshape(())
         wout = FRAME_W - VIEWPORT_W + 1
-        y = torch.div(peak_idx, wout, rounding_mode="floor")
-        x = peak_idx - y * wout
-        x_f = x.to(dtype=torch.float32)
-        y_f = y.to(dtype=torch.float32)
+        peak_idx_f = peak_idx.to(dtype=torch.float32)
+        y_f = torch.floor(peak_idx_f / float(wout))
+        x_f = peak_idx_f - y_f * float(wout)
         x1 = x_f * self.inv_frame[0]
         y1 = y_f * self.inv_frame[1]
         x2 = (x_f + self.size_px[0]) * self.inv_frame[2]
