@@ -523,7 +523,10 @@
 
     function figure(src, caption) {
       if (!src) return "";
-      return "<figure><img loading='lazy' src='" + escapeHtml(src) + "' alt='" +
+      const version = DATA.generated_at || "";
+      const versionedSrc = version ? src + (src.includes("?") ? "&" : "?") +
+        "v=" + encodeURIComponent(version) : src;
+      return "<figure><img loading='lazy' src='" + escapeHtml(versionedSrc) + "' alt='" +
         escapeHtml(caption) + "' /><figcaption>" + escapeHtml(caption) + "</figcaption></figure>";
     }
 

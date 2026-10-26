@@ -545,6 +545,7 @@ def build_review_index(out_dir: str) -> dict:
         print("Corrected swapped axes in %d saved VLM corrections" % repaired, flush=True)
     index = {
         "kind": "dhf1k_audit",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "selection": selection,
         "decisions": list(REVIEW_DECISIONS),
         "samples": samples,
