@@ -142,10 +142,7 @@ register-viewport-onnx:
 			--intended-use "$(INTENDED_USE_VIEWPORT)" \
 			--description "$(MODEL_DESCRIPTION_VIEWPORT)" \
 			--file $(VIEWPORT_ONNX) \
-			--flavor onnx \
-			--input-schema $(VIEWPORT_INPUT_SCHEMA) \
-			--output-schema $(VIEWPORT_OUTPUT_SCHEMA) \
-			--param paired_pt=$(MODEL_VIEWPORT_PT)); then \
+			--flavor onnx); then \
 			echo "Registration failed. Checking current state (never retried automatically):" >&2; \
 			$(COHUB) models get $(MODEL_VIEWPORT) >&2 || true; \
 			exit 1; \
@@ -182,11 +179,7 @@ register-viewport-pt:
 			--intended-use "$(INTENDED_USE_VIEWPORT)" \
 			--description "$(MODEL_DESCRIPTION_VIEWPORT)" \
 			--file $(VIEWPORT_PT) \
-			--flavor pytorch \
-			--input-schema $(VIEWPORT_INPUT_SCHEMA) \
-			--output-schema $(VIEWPORT_OUTPUT_SCHEMA) \
-			--param paired_onnx=$(MODEL_VIEWPORT) \
-			--param source_ckpt=vinet_s_dhf1k.pt); then \
+			--flavor pytorch); then \
 			echo "Registration failed. Checking current state (never retried automatically):" >&2; \
 			$(COHUB) models get $(MODEL_VIEWPORT_PT) >&2 || true; \
 			exit 1; \

@@ -42,6 +42,8 @@ print_block() {
   echo
 }
 
+# cohub CLI v1.0.4 has no --input-schema/--output-schema/--param with --file;
+# I/O contract is documented in INFERENCE_CONTRACT.md and the model card.
 print_block "cohub models register (onnx)" \
   "$COHUB" -o json models register \
   --name "$MODEL_VIEWPORT" \
@@ -51,10 +53,7 @@ print_block "cohub models register (onnx)" \
   --intended-use "$INTENDED_USE_VIEWPORT" \
   --description "$MODEL_DESCRIPTION_VIEWPORT" \
   --file "$VIEWPORT_ONNX" \
-  --flavor onnx \
-  --input-schema "$INPUT_SCHEMA" \
-  --output-schema "$OUTPUT_SCHEMA" \
-  --param "paired_pt=$MODEL_VIEWPORT_PT"
+  --flavor onnx
 
 print_block "cohub models register (pytorch)" \
   "$COHUB" -o json models register \
@@ -65,11 +64,7 @@ print_block "cohub models register (pytorch)" \
   --intended-use "$INTENDED_USE_VIEWPORT" \
   --description "$MODEL_DESCRIPTION_VIEWPORT" \
   --file "$VIEWPORT_PT" \
-  --flavor pytorch \
-  --input-schema "$INPUT_SCHEMA" \
-  --output-schema "$OUTPUT_SCHEMA" \
-  --param "paired_onnx=$MODEL_VIEWPORT" \
-  --param "source_ckpt=vinet_s_dhf1k.pt"
+  --flavor pytorch
 
 echo "=== DRY RUN: cohub models card generate (onnx) ==="
 echo "$COHUB models card generate $MODEL_VIEWPORT <VERSION_FROM_REGISTER> --prefill \\"

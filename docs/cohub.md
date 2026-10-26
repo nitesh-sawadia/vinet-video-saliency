@@ -189,9 +189,10 @@ at the new tag.
 ## 5. Release sports-salient-viewport (ONNX + paired PT)
 
 Sports-agnostic 9:16 viewport head on pretrained ViNet-S. I/O contract:
-[`docs/INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md). Schemas:
-[`schemas/viewport_input_schema.json`](../schemas/viewport_input_schema.json),
-[`schemas/viewport_output_schema.json`](../schemas/viewport_output_schema.json).
+[`docs/INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md) (also set on the model
+card `preprocessing` field). Repo JSON schemas live under
+[`schemas/viewport_*.json`](../schemas/) for documentation; Cohub CLI v1.0.4
+does not accept `--input-schema` / `--output-schema` on `models register`.
 
 Cohub names (cross-tagged):
 
